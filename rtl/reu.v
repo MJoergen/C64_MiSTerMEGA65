@@ -33,7 +33,7 @@ module reu
 );
 
 reg ff00_wr;
-always @(posedge clk) begin
+always @(posedge clk) begin : label0
 	reg old_we;
 	
 	old_we <= cpu_we;
@@ -56,7 +56,7 @@ wire  [1:0] op_act = op_cur[3:2]; // 0: read, 1: write, 2: verify, 3: end
 reg dma_we_r;
 assign dma_we = dma_we_r & dma_cycle;
 
-always @(posedge clk) begin : label0
+always @(posedge clk) begin : label1
 	reg        old_cs;
 	reg  [1:0] state;
 	reg  [3:0] cnt;

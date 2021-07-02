@@ -160,10 +160,10 @@ module emu
 `endif
 
 	input         UART_CTS,
-	output        UART_RTS,
+	output reg    UART_RTS,
 	input         UART_RXD,
-	output        UART_TXD,
-	output        UART_DTR,
+	output reg    UART_TXD,
+	output reg    UART_DTR,
 	input         UART_DSR,
 
 	// Open-drain User port.
@@ -172,7 +172,7 @@ module emu
 	// 2..6 - USR2..USR6
 	// Set USER_OUT to 1 to read from USER_IN.
 	input   [6:0] USER_IN,
-	output  [6:0] USER_OUT,
+	output reg [6:0] USER_OUT,
 
 	input         OSD_STATUS
 );
@@ -1057,8 +1057,8 @@ wire       c64_iec_atn;
 wire       drive_iec_clk  = drive_iec_clk_o  & ext_iec_clk;
 wire       drive_iec_data = drive_iec_data_o & ext_iec_data;
 
-wire [7:0] drive_par_i;
-wire       drive_stb_i;
+reg  [7:0] drive_par_i;
+reg        drive_stb_i;
 wire [7:0] drive_par_o;
 wire       drive_stb_o;
 wire       drive_iec_clk_o;
