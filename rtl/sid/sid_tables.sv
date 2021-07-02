@@ -19,7 +19,7 @@ module sid_tables
 	// filter
 	input       [1:0] cfg,
 	input      [10:0] Fc,
-	output     [17:0] F0,
+	output reg [17:0] F0,
 	input             ld_clk,
 	input      [11:0] ld_addr,
 	input      [15:0] ld_data,

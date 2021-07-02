@@ -15,7 +15,7 @@ module sid_top
 	input         we,
 	input   [4:0] addr,
 	input   [7:0] data_in,
-	output  [7:0] data_out,
+	output reg [7:0] data_out,
 
 	input   [7:0] pot_x_l,
 	input   [7:0] pot_y_l,
@@ -73,10 +73,10 @@ wire        voice_1_PA_MSB[N];
 wire        voice_2_PA_MSB[N];
 wire        voice_3_PA_MSB[N];
 
-wire  [7:0] _st_out[N*3];
-wire  [7:0] p_t_out[N*3];
-wire  [7:0] ps__out[N*3];
-wire  [7:0] pst_out[N*3];
+reg  [7:0] _st_out[N*3];
+reg  [7:0] p_t_out[N*3];
+reg  [7:0] ps__out[N*3];
+reg  [7:0] pst_out[N*3];
 wire [11:0] acc_ps[N*3];
 wire [11:0] acc_t[N*3];
 

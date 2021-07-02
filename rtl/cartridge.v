@@ -64,7 +64,7 @@ assign     game  = game_overide  & ~force_ultimax;
 (* ramstyle = "logic" *) reg [6:0] hibanks[0:63];
 
 reg  [7:0] bank_cnt;
-always @(posedge clk32) begin
+always @(posedge clk32) begin : label0
 	reg old_loading;
 	old_loading <= cart_loading;
 
@@ -123,7 +123,7 @@ reg  force_ultimax;
 // 0018 - EXROM line status
 // 0019 - GAME line status
 
-always @(posedge clk32) begin
+always @(posedge clk32) begin : label1
 	reg        init_n = 0;
 	reg        allow_freeze = 0;
 	reg        saved_d6 = 0;

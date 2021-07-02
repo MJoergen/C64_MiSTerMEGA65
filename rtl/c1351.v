@@ -41,7 +41,7 @@ assign button = ps2_mouse[1:0];
 reg [5:0] x;
 reg [5:0] y;
 
-always @(posedge clk_sys) begin
+always @(posedge clk_sys) begin : label0
 	reg old_status;
 	
 	old_status <= ps2_mouse[24];

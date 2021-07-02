@@ -168,7 +168,7 @@ always @(*) begin
 	endcase
 end
 
-always @(posedge clkcpu) begin
+always @(posedge clkcpu) begin : label0
 	reg [W:0] img_mountedD;
 	integer i;
 	img_mountedD <= img_mounted;
@@ -278,7 +278,7 @@ endgenerate
 // -------------------------------------------------------------------------
 
 reg [WIDX:0] fdn;
-always begin
+always begin : label1
 	integer i;
 	
 	fdn = 0;
@@ -359,7 +359,7 @@ reg track_inc_strobe;
 reg track_dec_strobe;
 reg track_clear_strobe;
 
-always @(posedge clkcpu) begin
+always @(posedge clkcpu) begin : label2
 	reg [1:0] seek_state;
 	reg notready_wait;
 	reg sector_not_found;
@@ -733,7 +733,7 @@ reg [1:0] sd_state;
 reg       sd_card_write;
 reg       sd_card_read;
 
-always @(posedge clkcpu) begin
+always @(posedge clkcpu) begin : label3
 	reg sd_ackD;
 	reg sd_card_readD;
 	reg sd_card_writeD;
@@ -802,7 +802,7 @@ function [15:0] crc;
 	end
 endfunction
 
-always @(posedge clkcpu) begin
+always @(posedge clkcpu) begin : label4
 	reg        data_transfer_startD;
 	reg [10:0] data_transfer_cnt;
 	reg [15:0] crcval;

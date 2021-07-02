@@ -140,7 +140,7 @@ always @(posedge clk) begin
 end
 
 // FLAG Input
-always @(posedge clk) begin
+always @(posedge clk) begin : label0
 	reg old_flag, flag;
 
 	old_flag <= flag_n;
@@ -440,7 +440,7 @@ end
 wire [4:0] icr_adj = {icr[4:2], timer_b_int, icr[0]};
 
 // Interrupt Control
-always @(posedge clk) begin
+always @(posedge clk) begin : label1
   reg [7:0] imr_reg;
 
   if (!res_n) begin

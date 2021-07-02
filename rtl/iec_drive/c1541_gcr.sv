@@ -70,7 +70,7 @@ wire [4:0] gcr_lut[16] = '{
 	5'b10110, 5'b10111, 5'b01111, 5'b10101
 };
 
-wire [3:0] nibble_out;
+reg [3:0] nibble_out;
 always_comb begin
 	case(gcr_nibble_out)
 		5'b01010: nibble_out = 'h0;

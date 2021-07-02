@@ -33,7 +33,7 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// parallel bus
 	input   [7:0] par_data_i,
 	input         par_stb_i,
-	output  [7:0] par_data_o,
+	output reg [7:0] par_data_o,
 	output        par_stb_o,
 
 	//clk_sys ports

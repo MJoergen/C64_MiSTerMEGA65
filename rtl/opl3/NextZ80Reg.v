@@ -87,7 +87,7 @@ module Z80Reg(
 // 0:BC, 1:DE, 2:HL, 3:A-x, 4:I-x, 5:IX, 6:IY, 7:x-x, 8:BC', 9:DE', 10:HL', 11:A'-x, 12: tmpSP, 13:zero
 
 	reg [15:0] regs[14];
-	always @(posedge CLK) begin
+	always @(posedge CLK) begin : label0
 		reg [3:0] i;
 		if(WE[0] & !WAIT) regs[SELW][7:0]  <= DIN[7:0];
 		if(WE[1] & !WAIT) regs[SELW][15:8] <= DIN[15:8];
