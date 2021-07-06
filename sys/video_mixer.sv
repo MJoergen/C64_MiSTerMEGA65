@@ -88,15 +88,19 @@ always @(posedge CLK_VIDEO) begin
 	frz  <= frz1;
 end
 
+wire [7:0] R_in;
+wire [7:0] G_in;
+wire [7:0] B_in;
+
 generate
 	if(GAMMA && HALF_DEPTH) begin
-		wire [7:0] R_in  = frz ? 8'd0 : {R,R};
-		wire [7:0] G_in  = frz ? 8'd0 : {G,G};
-		wire [7:0] B_in  = frz ? 8'd0 : {B,B};
+		assign R_in = frz ? 8'd0 : {R,R};
+		assign G_in = frz ? 8'd0 : {G,G};
+		assign B_in = frz ? 8'd0 : {B,B};
 	end else begin
-		wire [DWIDTH:0] R_in = frz ? 1'd0 : R;
-		wire [DWIDTH:0] G_in = frz ? 1'd0 : G;
-		wire [DWIDTH:0] B_in = frz ? 1'd0 : B;
+		assign R_in = frz ? 1'd0 : R;
+		assign G_in = frz ? 1'd0 : G;
+		assign B_in = frz ? 1'd0 : B;
 	end
 endgenerate
 
