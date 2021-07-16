@@ -1,9 +1,8 @@
--- altera message_off 10306
-
 library ieee;
 use IEEE.std_logic_1164.all;
 use IEEE.std_logic_unsigned.ALL;
 use IEEE.numeric_std.all;
+use STD.textio.ALL;
 
 entity dprom is
 
@@ -34,14 +33,25 @@ architecture rtl of dprom is
 	subtype word_t is std_logic_vector((DATA_WIDTH-1) downto 0);
 	type memory_t is array(2**ADDR_WIDTH-1 downto 0) of word_t;
 
-	shared variable ram : memory_t;
-	
-	attribute ram_init_file : string;
-	attribute ram_init_file of ram : variable is INIT_FILE;
+   impure function read_romfile(rom_file_name : in string) return memory_t is
+      file     rom_file  : text;
+      variable line_v    : line;
+      variable rom_v     : memory_t;
+   begin
+      file_open(rom_file, rom_file_name, read_mode);
+      for i in memory_t'range loop
+         if not endfile(rom_file) then
+            readline(rom_file, line_v);
+            read(line_v, rom_v(i));
+         end if;
+      end loop;
+      return rom_v;
+   end function;
+
+	shared variable ram : memory_t := read_romfile(INIT_FILE & ".hex");
 	
 	signal q0 : std_logic_vector((DATA_WIDTH - 1) downto 0);
 	
-
 begin
 
 	q<= q0 when cs = '1' else (others => '1');
