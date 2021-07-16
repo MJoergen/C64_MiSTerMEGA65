@@ -189,7 +189,7 @@ mcp23009 mcp23009
 
 
 reg btn_user, btn_osd;
-always @(posedge FPGA_CLK2_50) begin
+always @(posedge FPGA_CLK2_50) begin : label0
 	integer div;
 	reg [7:0] deb_user;
 	reg [7:0] deb_osd;
@@ -244,7 +244,7 @@ always @(posedge clk_sys) begin
 end
 
 reg [31:0] gp_outr;
-always @(posedge clk_sys) begin
+always @(posedge clk_sys) begin : label1
 	reg [31:0] gp_outd;
 	gp_outr <= gp_outd;
 	gp_outd <= gp_out;
@@ -325,7 +325,7 @@ reg [12:0] arc1y = 0;
 reg [12:0] arc2x = 0;
 reg [12:0] arc2y = 0;
 
-always@(posedge clk_sys) begin
+always@(posedge clk_sys) begin : label2
 	reg  [7:0] cmd;
 	reg        has_cmd;
 	reg        old_strobe;
@@ -495,7 +495,7 @@ cyclonev_hps_interface_interrupts interrupts
 ///////////////////////////  RESET  ///////////////////////////////////
 
 reg reset_req = 0;
-always @(posedge FPGA_CLK2_50) begin
+always @(posedge FPGA_CLK2_50) begin : label3
 	reg [1:0] resetd, resetd2;
 	reg       old_reset;
 
@@ -789,7 +789,7 @@ reg [11:0] vmax;
 reg [11:0] hdmi_height;
 reg [11:0] hdmi_width;
 
-always @(posedge clk_vid) begin
+always @(posedge clk_vid) begin : label4
 	reg [11:0] hmini,hmaxi,vmini,vmaxi;
 	reg [11:0] wcalc,videow,arx;
 	reg [11:0] hcalc,videoh,ary;
@@ -914,7 +914,7 @@ wire        pal_wr;
 
 reg  [28:0] pal_addr;
 reg         pal_req = 0;
-always @(posedge clk_pal) begin
+always @(posedge clk_pal) begin : label5
 	reg old_vs1, old_vs2;
 
 	pal_addr <= LFB_BASE[31:3] - 29'd512;
@@ -975,7 +975,7 @@ pll_cfg pll_cfg
 );
 
 reg cfg_got = 0;
-always @(posedge clk_sys) begin
+always @(posedge clk_sys) begin : label6
 	reg vsd, vsd2;
 	if(~cfg_ready || ~cfg_set) cfg_got <= cfg_set;
 	else begin
@@ -986,7 +986,7 @@ always @(posedge clk_sys) begin
 end
 
 reg cfg_ready = 0;
-always @(posedge FPGA_CLK1_50) begin
+always @(posedge FPGA_CLK1_50) begin : label7
 	reg gotd = 0, gotd2 = 0;
 	reg custd = 0, custd2 = 0;
 	reg old_wait = 0;
@@ -1108,7 +1108,7 @@ csync csync_hdmi(clk_hdmi, hdmi_hs_osd, hdmi_vs_osd, hdmi_cs_osd);
 
 reg [23:0] dv_data;
 reg        dv_hs, dv_vs, dv_de;
-always @(posedge clk_vid) begin
+always @(posedge clk_vid) begin : label8
 	reg [23:0] dv_d1, dv_d2;
 	reg        dv_de1, dv_de2, dv_hs1, dv_hs2, dv_vs1, dv_vs2;
 	reg [12:0] vsz, vcnt;
@@ -1189,7 +1189,7 @@ reg hdmi_out_vs;
 reg hdmi_out_de;
 reg [23:0] hdmi_out_d;
 
-always @(posedge hdmi_tx_clk) begin
+always @(posedge hdmi_tx_clk) begin : label9
 	reg hs,vs,de;
 	reg [23:0] d;
 	
@@ -1297,7 +1297,7 @@ csync csync_vga(clk_vid, vga_hs_osd, vga_vs_osd, vga_cs_osd);
 `endif
 
 reg video_sync = 0;
-always @(posedge clk_vid) begin
+always @(posedge clk_vid) begin : label10
 	reg [11:0] line_cnt  = 0;
 	reg [11:0] sync_line = 0;
 	reg  [1:0] hs_cnt = 0;
@@ -1639,7 +1639,7 @@ module sync_fix
 assign sync_out = sync_in ^ pol;
 
 reg pol;
-always @(posedge clk) begin
+always @(posedge clk) begin : label11
 	integer pos = 0, neg = 0, cnt = 0;
 	reg s1,s2;
 
@@ -1674,7 +1674,7 @@ module csync
 assign csync = (csync_vs ^ csync_hs);
 
 reg csync_hs, csync_vs;
-always @(posedge clk) begin
+always @(posedge clk) begin : label12
 	reg prev_hs;
 	reg [15:0] h_cnt, line_len, hs_len;
 
