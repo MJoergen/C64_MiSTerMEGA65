@@ -42,7 +42,7 @@ architecture rtl of dprom is
       for i in memory_t'range loop
          if not endfile(rom_file) then
             readline(rom_file, line_v);
-            read(line_v, rom_v(i));
+            hread(line_v, rom_v(i));
          end if;
       end loop;
       return rom_v;
