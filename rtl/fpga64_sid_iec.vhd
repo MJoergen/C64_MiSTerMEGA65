@@ -49,9 +49,15 @@ port(
 	pause       : in  std_logic := '0';
 	pause_out   : out std_logic;
 
-	-- keyboard interface (use any ordinairy PS2 keyboard)
-	ps2_key     : in  std_logic_vector(10 downto 0);
-	kbd_reset   : in  std_logic := '0';
+--	-- keyboard interface (use any ordinairy PS2 keyboard)
+--	ps2_key     : in  std_logic_vector(10 downto 0);
+--	kbd_reset   : in  std_logic := '0';
+
+   -- keyboard interface: directly connect the CIA1
+   cia1_pa_i   : in std_logic_vector(7 downto 0);
+   cia1_pa_o   : out std_logic_vector(7 downto 0);
+   cia1_pb_i   : in std_logic_vector(7 downto 0);
+   cia1_pb_o   : out std_logic_vector(7 downto 0);
 
 	-- external memory
 	ramAddr     : out unsigned(15 downto 0);
@@ -229,9 +235,9 @@ signal enableCia_p  : std_logic;
 signal enableCia_n  : std_logic;
 signal cia1Do       : unsigned(7 downto 0);
 signal cia2Do       : unsigned(7 downto 0);
-signal cia1_pai     : unsigned(7 downto 0);
+--signal cia1_pai     : unsigned(7 downto 0);
 signal cia1_pao     : unsigned(7 downto 0);
-signal cia1_pbi     : unsigned(7 downto 0);
+--signal cia1_pbi     : unsigned(7 downto 0);
 signal cia1_pbo     : unsigned(7 downto 0);
 signal cia2_pai     : unsigned(7 downto 0);
 signal cia2_pao     : unsigned(7 downto 0);
@@ -546,7 +552,7 @@ port map (
 	
 	cs => cs_vic,
 	we => cpuWe,
-	lp_n => cia1_pbi(4),
+	lp_n => cia1_pb_i(4),
 
 	aRegisters => cpuAddr(5 downto 0),
 	diRegisters => cpuDo,
@@ -677,9 +683,9 @@ port map (
 	db_in => cpuDo,
 	db_out => cia1Do,
 
-	pa_in => cia1_pai,
+	pa_in => unsigned(cia1_pa_i),
 	pa_out => cia1_pao,
-	pb_in => cia1_pbi,
+	pb_in => unsigned(cia1_pb_i),
 	pb_out => cia1_pbo,
 
 	flag_n => cass_read,
@@ -692,6 +698,9 @@ port map (
 
 	irq_n => irq_cia1
 );
+
+cia1_pa_o <= std_logic_vector(cia1_pao);
+cia1_pb_o <= std_logic_vector(cia1_pbo);
 
 cia2: mos6526
 port map (
@@ -841,19 +850,20 @@ dma_din   <= cpuDi;
 -- -----------------------------------------------------------------------
 -- Keyboard
 -- -----------------------------------------------------------------------
+
 Keyboard: entity work.fpga64_keyboard
 port map (
 	clk => clk32,
 	
-	reset => kbd_reset,
-	ps2_key => ps2_key,
+	reset => '0',                            -- kbd_reset,
+	ps2_key => (others => '0'),              -- ps2_key,
 
 	joyA => not unsigned(joyA(6 downto 0)),
 	joyB => not unsigned(joyB(6 downto 0)),
-	pai => cia1_pao,
-	pbi => cia1_pbo,
-	pao => cia1_pai,
-	pbo => cia1_pbi,
+	pai => (others => '1'),                  -- cia1_pao,
+	pbi => (others => '1'),                  -- cia1_pbo,
+	pao => open,                             -- cia1_pai,
+	pbo => open,                             -- cia1_pbi,
 
 	restore_key => freeze_key,
 	tape_play => tape_play,
