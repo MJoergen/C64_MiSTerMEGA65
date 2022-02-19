@@ -31,7 +31,7 @@ end dprom;
 architecture rtl of dprom is
 
 	subtype word_t is std_logic_vector((DATA_WIDTH-1) downto 0);
-	type memory_t is array(2**ADDR_WIDTH-1 downto 0) of word_t;
+	type memory_t is array(0 to 2**ADDR_WIDTH-1) of word_t;
 
    impure function read_romfile(rom_file_name : in string) return memory_t is
       file     rom_file  : text;
