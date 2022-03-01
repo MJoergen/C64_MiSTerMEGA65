@@ -94,7 +94,7 @@ end
 wire [7:0] rom_do;
 generate
 	if(PARPORT || DUALROM) begin
-		iecdrv_mem #(8,15,"rtl/iec_drive/c1581_rom.mif") rom
+		iecdrv_mem #(8,15,"./c1581_rom.mif") rom
 		(
 			.clock_a(clk_sys),
 			.address_a(rom_addr),
@@ -112,7 +112,7 @@ generate
 endgenerate
 
 wire [7:0] romstd_do;
-iecdrv_mem #(8,15,"rtl/iec_drive/c1581_rom.mif") romstd
+iecdrv_mem #(8,15,"./c1581_rom.mif") romstd
 (
 	.clock_a(clk_sys),
 	.address_a(rom_addr),

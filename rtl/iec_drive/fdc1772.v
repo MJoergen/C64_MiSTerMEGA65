@@ -20,6 +20,9 @@
 // TODO: 
 // - 30ms settle time after step before data can be read
 // - implement sector size 0
+//
+// Discovery by sy2002 in March 2022:
+// Vivado needs interpret this as SystemVerilog even though it is "just" a ".v" file
 
 module fdc1772 (
 	input            clkcpu, // system cpu clock.
@@ -59,7 +62,7 @@ module fdc1772 (
 );
 
 parameter CLK_EN           = 16'd8000; // in kHz
-parameter FD_NUM           = 2;    // number of supported floppies
+parameter FD_NUM           = 1;    // number of supported floppies (changed by sy2002; should be a generic?)
 parameter MODEL            = 2;    // 0 - wd1770, 1 - fd1771, 2 - wd1772, 3 = wd1773/fd1793
 parameter SECTOR_SIZE_CODE = 2'd3; // sec size 0=128, 1=256, 2=512, 3=1024
 parameter SECTOR_BASE      = 1'b0; // number of first sector on track (archie 0, dos 1)

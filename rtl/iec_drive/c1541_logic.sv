@@ -72,7 +72,7 @@ wire        cpu_rw;
 wire        cpu_irq_n = ~(uc1_irq | uc3_irq);
 wire        cpu_so_n = byte_n | ~soe;
 
-T65 cpu
+T65 cpu 
 (
 	.mode(2'b00),
 	.res_n(~reset),

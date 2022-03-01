@@ -109,7 +109,7 @@ always @(posedge clk) rom_sz <= {rom_32k_i,rom_32k_i|rom_16k_i}; // support for 
 wire [7:0] rom_do;
 generate
 	if(PARPORT) begin
-		iecdrv_mem #(8,15,"rtl/iec_drive/c1541_dolphin.mif") rom
+		iecdrv_mem #(8,15,"./c1541_dolphin.mif") rom
 		(
 			.clock_a(clk_sys),
 			.address_a(rom_addr),
@@ -122,7 +122,7 @@ generate
 		);
 	end
 	else if(DUALROM) begin
-		iecdrv_mem #(8,14,"rtl/iec_drive/c1541_rom.mif") rom
+		iecdrv_mem #(8,14,"./c1541_rom.mif") rom
 		(
 			.clock_a(clk_sys),
 			.address_a(rom_addr[13:0]),
@@ -140,7 +140,7 @@ generate
 endgenerate
 
 wire [7:0] romstd_do;
-iecdrv_mem #(8,14,"rtl/iec_drive/c1541_rom.mif") romstd
+iecdrv_mem #(8,14,"./c1541_rom.mif") romstd
 (
 	.clock_a(clk_sys),
 	.address_a(rom_addr[13:0]),
