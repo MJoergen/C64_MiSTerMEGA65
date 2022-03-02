@@ -11,6 +11,8 @@
 //
 // Reworked and adapted to MiSTer by Alexey Melnikov
 //
+// Replaced "iecdrv_mem" RAM for "buffer" so that it works with QNICE's falling edge logic by sy2002 in 2022
+//
 //-------------------------------------------------------------------------------
 
 module c1541_gcr
@@ -128,6 +130,7 @@ always @(posedge sd_clk) begin
 	end
 end
 
+/*
 iecdrv_mem #(8,13) buffer
 (
 	.clock_a(sd_clk),
@@ -141,6 +144,25 @@ iecdrv_mem #(8,13) buffer
 	.data_b(buff_di),
 	.wren_b(we),
 	.q_b(buff_do)
+);
+*/
+
+dualport_2clk_ram #(
+   .ADDR_WIDTH(13),
+   .DATA_WIDTH(8),
+   .FALLING_A(1'b1)
+) buffer (
+	.clock_a(sd_clk),
+	.address_a(sd_buff_addr),
+	.data_a(sd_buff_dout),
+	.wren_a(sd_buff_wr),
+	.q_a(sd_buff_din),
+
+	.clock_b(clk),
+	.address_b(buff_addr),
+	.data_b(buff_di),
+	.wren_b(we),
+	.q_b(buff_do)   
 );
 
 reg [12:0] buff_addr;

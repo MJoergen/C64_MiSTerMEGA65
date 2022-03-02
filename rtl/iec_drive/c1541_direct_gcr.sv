@@ -43,7 +43,7 @@ always @(posedge sd_clk) if(sd_buff_wr && !sd_buff_addr[13:1]) begin
 end
 
 wire [7:0] sd_buff_do;
-iecdrv_bitmem #(13) buffer
+iecdrv_bitmem #(.ADDRWIDTH(13), .FALLING_A(1'b1)) buffer
 (
 	.clock_a(sd_clk),
 	.address_a(sd_buff_addr[12:0]),

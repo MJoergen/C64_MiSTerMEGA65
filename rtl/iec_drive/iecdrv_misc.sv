@@ -1,3 +1,12 @@
+/*
+   Adjusted to MiSTer2MEGA65 by sy2002 in March 2022:
+   
+   Vivado was not able to synthesize iecdrv_bitmem. One of many differences between Intel/Quartus and Xilinx/Vivado.
+   So I commented it out and turned it into a wrapper for MiSTer2MEGA65's dualport_2clk_ram, which also adds the
+   advantage that it is directly compatible with QNICE's falling edge logic for reading and writing.
+*/
+   
+
 
 module iecdrv_sync #(parameter WIDTH = 1) 
 (
@@ -68,7 +77,7 @@ end
 
 endmodule
 
-module iecdrv_bitmem #(parameter ADDRWIDTH)
+module iecdrv_bitmem #(parameter ADDRWIDTH, FALLING_A=1'b0, FALLING_B=1'b0)
 (
 	input	                     clock_a,
 	input	     [ADDRWIDTH-1:0] address_a,
@@ -82,6 +91,85 @@ module iecdrv_bitmem #(parameter ADDRWIDTH)
 	input	                     wren_b,
 	output reg                 q_b
 );
+
+// delay signals (MiSTer's original implementation does that so do we)
+reg                 wren_a_d;
+reg [ADDRWIDTH-1:0] address_a_d;
+reg           [7:0] data_a_d;
+
+if (FALLING_A == 1'b0) begin
+   always @(posedge clock_a) begin
+      wren_a_d    <= wren_a;
+      address_a_d <= address_a;
+      data_a_d    <= data_a;
+   end
+end else begin // QNICE expects the data to flow instantly on the falling edge, not delayed
+   assign wren_a_d    = wren_a;
+   assign address_a_d = address_a;
+   assign data_a_d    = data_a;
+end
+
+reg                 wren_b_d;
+reg [ADDRWIDTH+2:0] address_b_d;
+reg                 data_b_d;
+
+if (FALLING_B == 1'b0) begin
+   always @(posedge clock_b) begin
+      wren_b_d    <= wren_b;
+      address_b_d <= address_b;
+      data_b_d    <= data_b;
+   end
+end else begin // QNICE expects the data to flow instantly on the falling edge, not delayed
+   assign wren_b_d    = wren_b;
+   assign address_b_d = address_b;
+   assign data_b_d    = data_b;
+end
+
+// Use 8 1-bit RAMs to implement the dual-port RAM with different data-widths
+integer bit_selector = address_b[2:0];
+generate
+	genvar i;
+	for(i=0; i<8; i=i+1) begin : bitrams
+
+      wire q_a_bit, q_b_bit;
+      dualport_2clk_ram #(
+         .ADDR_WIDTH(ADDRWIDTH),
+         .DATA_WIDTH(1),
+         .FALLING_A(FALLING_A),
+         .FALLING_B(FALLING_B)
+      ) ram (
+         .clock_a(clock_a),
+         .address_a(address_a_d),
+         .data_a(data_a_d[i]),
+         .wren_a(wren_a_d),
+         .q_a(q_a_bit),
+      
+         .clock_b(clock_b),
+         .address_b(address_b_d[ADDRWIDTH+2:3]),
+         .data_b(data_b_d),
+         .wren_b(wren_b_d & (bit_selector == i)),
+         .q_b(q_b_bit)  
+      );
+      
+      assign q_a[i] = q_a_bit;
+   end
+endgenerate
+
+assign q_b = (bitrams[0].q_b_bit & (bit_selector == 0)) |
+             (bitrams[1].q_b_bit & (bit_selector == 1)) |
+             (bitrams[2].q_b_bit & (bit_selector == 2)) |
+             (bitrams[3].q_b_bit & (bit_selector == 3)) |
+             (bitrams[4].q_b_bit & (bit_selector == 4)) |
+             (bitrams[5].q_b_bit & (bit_selector == 5)) |
+             (bitrams[6].q_b_bit & (bit_selector == 6)) |
+             (bitrams[7].q_b_bit & (bit_selector == 7));
+
+endmodule
+
+
+/* Original MiSTer Intel/Quartus code that does not synthesize with Vivado v2019.2.
+   I did not try newer Vivado versions but replaced the code with a wrapper of 1-bit RAMs made with dualport_2clk_ram
+   done by sy2002 in March 2022
     
 reg [7:0] ram[1<<ADDRWIDTH];
 
@@ -120,5 +208,4 @@ always @(posedge clock_b) begin
 		q_b <= ram[address_b_d[ADDRWIDTH+2:3]][address_b_d[2:0]];
 	end
 end
-
-endmodule
+*/
