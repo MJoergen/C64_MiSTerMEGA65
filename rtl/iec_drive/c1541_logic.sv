@@ -84,9 +84,9 @@ T65 cpu
 	.nmi_n(1'b1),
 	.so_n(cpu_so_n),
 	.r_w_n(cpu_rw),
-	.A(cpu_a),
-	.DI(cpu_di),
-	.DO(cpu_do)
+	.a(cpu_a),
+	.din(cpu_di),    //changed to "din" due to the issue described in T65.vhd, section "March, 2 2022"
+	.dout(cpu_do)    //changed to "dout", ditto.
 );
 
 wire extram_cs = ext_en && (cpu_a[15:13] == 'b100);

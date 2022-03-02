@@ -94,9 +94,9 @@ T65 cpu
 	.res_n(~reset),
 	.irq_n(cia_irq_n & ~via_irq),
 	.r_w_n(cpu_rw),
-	.A(cpu_a),
-	.DI(cpu_di),
-	.DO(cpu_do)
+	.a(cpu_a),
+	.din(cpu_di),    //changed to "din" due to the issue described in T65.vhd, section "March, 2 2022"
+	.dout(cpu_do)    //changed to "dout", ditto.
 );
 
 wire [7:0] ram_do;

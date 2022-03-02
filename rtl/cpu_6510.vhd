@@ -68,8 +68,8 @@ begin
 		SO_n    => '1',
 		R_W_n   => localWe,
 		A       => localA,
-		DI      => localDi,
-		DO      => localDo,
+		din     => localDi,   -- changed to "din" due to the issue described in T65.vhd, section "March, 2 2022"
+		dout    => localDo,   -- changed to "dout", ditto.
 		NMI_ack => nmi_ack
 	);
 
