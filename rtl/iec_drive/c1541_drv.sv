@@ -197,7 +197,8 @@ wire busy;
 
 c1541_track c1541_track
 (
-	.clk(clk_sys),
+	.clk(clk_sys),      //"SD" clock = QNICE
+	.clk_core(clk),     //core clock
 	.reset(reset),
 
 	.gcr_mode(gcr_mode),
@@ -211,7 +212,7 @@ c1541_track c1541_track
 	.save_track(save_track),
 	.change(img_mounted),
 	.track(track),
-	.busy(busy)
+	.busy_o(busy)
 );
 
 reg [6:0] track;

@@ -20,7 +20,8 @@
 
 module c1541_track
 (
-	input         clk,
+	input         clk,        //"SD" clock = QNICE
+	input         clk_core,   //core clock
 	input         reset,
 	
 	input         gcr_mode,
@@ -34,8 +35,10 @@ module c1541_track
 	input         save_track,
 	input         change,
 	input   [6:0] track,
-	output reg    busy
+	output reg    busy_o
 );
+
+reg busy;
 
 assign sd_lba     = lba;
 assign sd_blk_cnt = gcr_mode ? 6'h1F : len[5:0];
@@ -43,10 +46,30 @@ assign sd_blk_cnt = gcr_mode ? 6'h1F : len[5:0];
 wire [6:0] track_s;
 wire       change_s, save_track_s, reset_s;
 
+/* replaced by proper clock domain crossing for MEGA65 by sy2002 in March 2022
 iecdrv_sync #(7) track_sync  (clk, track,      track_s);
 iecdrv_sync #(1) change_sync (clk, change,     change_s);
 iecdrv_sync #(1) save_sync   (clk, save_track, save_track_s);
 iecdrv_sync #(1) reset_sync  (clk, reset,      reset_s);
+*/
+
+xpm_cdc_array_single #(
+   .WIDTH(10)
+) cdc_core2qnice (
+   .src_clk(clk_core),
+   .src_in({track, change, save_track, reset}),
+   .dest_clk(clk),
+   .dest_out({track_s, change_s, save_track_s, reset_s})
+);
+
+xpm_cdc_array_single #(
+   .WIDTH(1)
+) cdc_qnice2core (
+   .src_clk(clk),
+   .src_in(busy),
+   .dest_clk(clk_core),
+   .dest_out(busy_o)
+);
 
 wire [9:0] start_sectors[41] =
 '{  0, 21, 42, 63, 84,105,126,147,168,189,210,231,252,273,294,315,336,357,376,395,
