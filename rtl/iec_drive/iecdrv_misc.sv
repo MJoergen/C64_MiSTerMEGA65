@@ -126,7 +126,13 @@ end else begin // QNICE expects the data to flow instantly on the falling edge, 
 end
 
 // Use 8 1-bit RAMs to implement the dual-port RAM with different data-widths
-integer bit_selector = address_b[2:0];
+integer bit_selector_d;
+assign bit_selector_d = address_b_d[2:0];
+integer bit_selector_dd;
+always @(posedge clock_b) begin
+   bit_selector_dd <= bit_selector_d;
+end
+
 generate
 	genvar i;
 	for(i=0; i<8; i=i+1) begin : bitrams
@@ -147,7 +153,7 @@ generate
          .clock_b(clock_b),
          .address_b(address_b_d[ADDRWIDTH+2:3]),
          .data_b(data_b_d),
-         .wren_b(wren_b_d & (bit_selector == i)),
+         .wren_b(wren_b_d & (bit_selector_d == i)),
          .q_b(q_b_bit)  
       );
       
@@ -155,14 +161,14 @@ generate
    end
 endgenerate
 
-assign q_b = (bitrams[0].q_b_bit & (bit_selector == 0)) |
-             (bitrams[1].q_b_bit & (bit_selector == 1)) |
-             (bitrams[2].q_b_bit & (bit_selector == 2)) |
-             (bitrams[3].q_b_bit & (bit_selector == 3)) |
-             (bitrams[4].q_b_bit & (bit_selector == 4)) |
-             (bitrams[5].q_b_bit & (bit_selector == 5)) |
-             (bitrams[6].q_b_bit & (bit_selector == 6)) |
-             (bitrams[7].q_b_bit & (bit_selector == 7));
+assign q_b = (bitrams[0].q_b_bit & (bit_selector_dd == 0)) |
+             (bitrams[1].q_b_bit & (bit_selector_dd == 1)) |
+             (bitrams[2].q_b_bit & (bit_selector_dd == 2)) |
+             (bitrams[3].q_b_bit & (bit_selector_dd == 3)) |
+             (bitrams[4].q_b_bit & (bit_selector_dd == 4)) |
+             (bitrams[5].q_b_bit & (bit_selector_dd == 5)) |
+             (bitrams[6].q_b_bit & (bit_selector_dd == 6)) |
+             (bitrams[7].q_b_bit & (bit_selector_dd == 7));
 
 endmodule
 
