@@ -127,7 +127,7 @@ end
    for many cycles, my justified gut feeling is: This is OK.
 */
 
-reg [7:0] id1=0, id2=0;
+reg [7:0] id1, id2;
 reg [7:0] id1_qnice=0, id2_qnice=0;
 
 always @(posedge sd_clk) begin
