@@ -122,15 +122,33 @@ always @(posedge clk) begin
 	end
 end
 
+/* added clock domain crossing for MEGA65 by sy2002 in March 2022
+   I hope this does not has any timing impact. Since QNICE keeps sd_buff_addr and buff_wr high
+   for many cycles, my justified gut feeling is: This is OK.
+*/
+
 reg [7:0] id1=0, id2=0;
+reg [7:0] id1_qnice=0, id2_qnice=0;
+
 always @(posedge sd_clk) begin
 	if(sd_lba == 357 && sd_buff_wr) begin
-		if(sd_buff_addr == 'hA2) id1 <= sd_buff_dout;
-		if(sd_buff_addr == 'hA3) id2 <= sd_buff_dout;
+		if(sd_buff_addr == 'hA2) id1_qnice <= sd_buff_dout;
+		if(sd_buff_addr == 'hA3) id2_qnice <= sd_buff_dout;
 	end
 end
 
-/*
+xpm_cdc_array_single #(
+   .WIDTH(16)
+) cdc_qnice2core (
+   .src_clk(sd_clk),
+   .src_in({id1_qnice, id2_qnice}),
+   .dest_clk(clk),
+   .dest_out({id1, id2})
+);
+
+/* replaced buffer RAM by QNICE compatible RAM with falling-edge writing
+   done during MEGA65 port by sy2002 in March 2022
+   
 iecdrv_mem #(8,13) buffer
 (
 	.clock_a(sd_clk),
