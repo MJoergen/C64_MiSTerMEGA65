@@ -4,7 +4,7 @@
 // (C) 2021 Alexey Melnikov
 //
 //-------------------------------------------------------------------------------
-
+ 
 module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 (
 	//clk ports
