@@ -112,8 +112,12 @@ generate
 endgenerate
 
 wire [7:0] romstd_do;
-iecdrv_mem #(8,15,"./c1581_rom.mif") romstd
-(
+iecdrv_mem #(
+   .DATAWIDTH(8),
+   .ADDRWIDTH(15),
+   .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1581_rom.mif.hex"),
+   .FALLING_A(1'b1)
+) romstd (
 	.clock_a(clk_sys),
 	.address_a(rom_addr),
 	.data_a(rom_data),
