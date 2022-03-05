@@ -3,9 +3,10 @@
    
    1. The iecdrv_sync needs appropriate set_false_path settings in the XDC for each instantiation.
    
-   2. iecdrv_mem's data loading mechanism did not work in Vivado, so I turned the module into a wrapper for
-      MiSTer2MEGA65's dualport_2clk_ram, which adds the advantage of being QNICE compatible (falling edge).
-   
+   2. iecdrv_mem's data loading mechanism did not work in Vivado: Solution: Creating two modules: One for
+      ROM loading that is a wrapper for MiSTer2MEGA65's dualport_2clk_ram, which adds the advantage of being
+      QNICE compatible (falling edge). Additionally a RAM module that is identical to the original module iecdrv_mem. 
+     
    3. Vivado was not able to synthesize iecdrv_bitmem. One of many differences between Intel/Quartus and Xilinx/Vivado.
       So I commented it out and turned it into a wrapper for MiSTer2MEGA65's dualport_2clk_ram, which also adds the
       advantage that it is directly compatible with QNICE's falling edge logic for reading and writing.
@@ -30,8 +31,65 @@ end
 endmodule
 
 // -------------------------------------------------------------------------------
+// RAM
+// -------------------------------------------------------------------------------
 
-module iecdrv_mem #(parameter DATAWIDTH, ADDRWIDTH, INITFILE=" ", FALLING_A=1'b0, FALLING_B=1'b0)
+module iecdrv_mem #(parameter DATAWIDTH, ADDRWIDTH)
+(
+	input	                     clock_a,
+	input	     [ADDRWIDTH-1:0] address_a,
+	input	     [DATAWIDTH-1:0] data_a,
+	input	                     wren_a,
+	output reg [DATAWIDTH-1:0] q_a,
+
+	input	                     clock_b,
+	input	     [ADDRWIDTH-1:0] address_b,
+	input	     [DATAWIDTH-1:0] data_b,
+	input	                     wren_b,
+	output reg [DATAWIDTH-1:0] q_b
+);
+
+reg [DATAWIDTH-1:0] ram[1<<ADDRWIDTH];
+
+reg                 wren_a_d;
+reg [ADDRWIDTH-1:0] address_a_d;
+always @(posedge clock_a) begin
+	wren_a_d    <= wren_a;
+	address_a_d <= address_a;
+end
+
+always @(posedge clock_a) begin
+	if(wren_a_d) begin
+		ram[address_a_d] <= data_a;
+		q_a <= data_a;
+	end else begin
+		q_a <= ram[address_a_d];
+	end
+end
+
+reg                 wren_b_d;
+reg [ADDRWIDTH-1:0] address_b_d;
+always @(posedge clock_b) begin
+	wren_b_d    <= wren_b;
+	address_b_d <= address_b;
+end
+
+always @(posedge clock_b) begin
+	if(wren_b_d) begin
+		ram[address_b_d] <= data_b;
+		q_b <= data_b;
+	end else begin
+		q_b <= ram[address_b_d];
+	end
+end
+
+endmodule
+
+// -------------------------------------------------------------------------------
+// ROM
+// -------------------------------------------------------------------------------
+
+module iecdrv_mem_rom #(parameter DATAWIDTH, ADDRWIDTH, INITFILE=" ", FALLING_A=1'b0, FALLING_B=1'b0)
 (
 	input	                     clock_a,
 	input	     [ADDRWIDTH-1:0] address_a,
@@ -57,13 +115,13 @@ dualport_2clk_ram #(
 ) ram (
    .clock_a(clock_a),
    .address_a(address_a_d),
-   .data_a(data_a_d),
+   .data_a(data_a),
    .wren_a(wren_a_d),
    .q_a(q_a),
 
    .clock_b(clock_b),
    .address_b(address_b_d),
-   .data_b(data_b_d),
+   .data_b(data_b),
    .wren_b(wren_b_d),
    .q_b(q_b) 
 );
@@ -71,37 +129,35 @@ dualport_2clk_ram #(
 // delay signals (MiSTer's original implementation does that so do we)
 reg                 wren_a_d;
 reg [ADDRWIDTH-1:0] address_a_d;
-reg           [7:0] data_a_d;
 
 if (FALLING_A == 1'b0) begin
    always @(posedge clock_a) begin
       wren_a_d    <= wren_a;
       address_a_d <= address_a;
-      data_a_d    <= data_a;
    end
 end else begin // QNICE expects the data to flow instantly on the falling edge, not delayed
    assign wren_a_d    = wren_a;
    assign address_a_d = address_a;
-   assign data_a_d    = data_a;
 end
 
 reg                 wren_b_d;
 reg [ADDRWIDTH+2:0] address_b_d;
-reg                 data_b_d;
 
 if (FALLING_B == 1'b0) begin
    always @(posedge clock_b) begin
       wren_b_d    <= wren_b;
       address_b_d <= address_b;
-      data_b_d    <= data_b;
    end
 end else begin // QNICE expects the data to flow instantly on the falling edge, not delayed
    assign wren_b_d    = wren_b;
    assign address_b_d = address_b;
-   assign data_b_d    = data_b;
 end
 
 endmodule
+
+// -------------------------------------------------------------------------------
+// Dual width memory aka "bitmem"
+// -------------------------------------------------------------------------------
 
 module iecdrv_bitmem #(parameter ADDRWIDTH, FALLING_A=1'b0, FALLING_B=1'b0)
 (

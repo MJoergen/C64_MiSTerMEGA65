@@ -140,7 +140,7 @@ generate
 endgenerate
 
 wire [7:0] romstd_do;
-iecdrv_mem #(
+iecdrv_mem_rom #(
    .DATAWIDTH(8),
    .ADDRWIDTH(14),
    .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1541_rom.mif.hex"),
