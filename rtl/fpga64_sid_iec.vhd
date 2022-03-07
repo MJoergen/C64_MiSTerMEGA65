@@ -769,8 +769,8 @@ begin
 			end if;
 		else
 			sum := sum + 100;
-			if sum >= 31527954 then
-				sum := sum - 31527954;
+			if sum >= 31527778 then       -- original MiSTer value: 31527954
+				sum := sum - 31527778;
 				todclk <= not todclk;
 			end if;
 		end if;
