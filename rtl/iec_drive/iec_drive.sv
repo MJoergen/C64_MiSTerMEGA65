@@ -135,7 +135,7 @@ wire  [N:0] c1581_led;
 wire  [7:0] c1581_sd_buff_dout[NDR];
 wire [31:0] c1581_sd_lba[NDR];
 wire  [N:0] c1581_sd_rd, c1581_sd_wr;
-
+/*
 c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 (
 	.clk(clk),
@@ -177,5 +177,5 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.sd_buff_din(c1581_sd_buff_dout),
 	.sd_buff_wr(sd_buff_wr)
 );
-
+*/
 endmodule
