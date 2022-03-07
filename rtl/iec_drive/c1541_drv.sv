@@ -169,6 +169,9 @@ c1541_gcr c1541_gcr
 wire [7:0] dgcr_do, dgcr_sd_buff_dout;
 wire       dgcr_sync_n, dgcr_byte_n, dgcr_we;
 
+/*
+//when commenting-in again: needs iecdrv_bitmem, which is currently commented-out in iecdrv_misc.sv
+//there are some CDC challenges inside: QNICE clock domain (sd_clk) to core (clk): track_len to buff_addr, and others
 c1541_direct_gcr c1541_direct_gcr
 (
 	.clk(clk),
@@ -192,6 +195,7 @@ c1541_direct_gcr c1541_direct_gcr
 	.sd_buff_din(dgcr_sd_buff_dout),
 	.sd_buff_wr(sd_ack & sd_buff_wr & gcr_mode)
 );
+*/
 
 wire busy;
 

@@ -155,6 +155,7 @@ end
 
 endmodule
 
+/*
 // -------------------------------------------------------------------------------
 // Dual width memory aka "bitmem"
 // -------------------------------------------------------------------------------
@@ -253,7 +254,7 @@ assign q_b = (bitrams[0].q_b_bit & (bit_selector_dd == 0)) |
              (bitrams[7].q_b_bit & (bit_selector_dd == 7));
 
 endmodule
-
+*/
 
 /* Original MiSTer Intel/Quartus code that does not synthesize with Vivado v2019.2.
    I did not try newer Vivado versions but replaced the code with a wrapper of 1-bit RAMs made with dualport_2clk_ram
