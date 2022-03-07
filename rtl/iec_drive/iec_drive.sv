@@ -62,9 +62,9 @@ localparam N   = NDR - 1;
 reg [N:0] dtype[2];
 always @(posedge clk_sys) for(int i=0; i<NDR; i=i+1) if(img_mounted[i] && img_size) {dtype[1][i],dtype[0][i]} <= img_type;
 
-assign led          = c1581_led       | c1541_led;
-assign iec_data_o   = c1581_iec_data  & c1541_iec_data;
-assign iec_clk_o    = c1581_iec_clk   & c1541_iec_clk;
+assign led          = /*c1581_led       |*/ c1541_led;
+assign iec_data_o   = /*c1581_iec_data  &*/ c1541_iec_data;
+assign iec_clk_o    = /*c1581_iec_clk   &*/ c1541_iec_clk;
 assign par_stb_o    = c1581_stb_o     & c1541_stb_o;
 assign par_data_o   = c1581_par_o     & c1541_par_o;
 
@@ -93,8 +93,8 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 	.gcr_mode(dtype[0]),
 
 	.iec_atn_i (iec_atn_i),
-	.iec_data_i(iec_data_i & c1581_iec_data),
-	.iec_clk_i (iec_clk_i  & c1581_iec_clk),
+	.iec_data_i(iec_data_i /*& c1581_iec_data */),
+	.iec_clk_i (iec_clk_i  /*& c1581_iec_clk */),
 	.iec_data_o(c1541_iec_data),
 	.iec_clk_o (c1541_iec_clk),
 
@@ -135,7 +135,7 @@ wire  [N:0] c1581_led;
 wire  [7:0] c1581_sd_buff_dout[NDR];
 wire [31:0] c1581_sd_lba[NDR];
 wire  [N:0] c1581_sd_rd, c1581_sd_wr;
-/*
+/* //When commenting-in this here, don't forget to comment-in above c1581_iec_data, c1581_iec_clk, c1581_led 
 c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 (
 	.clk(clk),
