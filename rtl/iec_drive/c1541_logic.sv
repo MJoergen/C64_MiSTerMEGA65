@@ -48,6 +48,27 @@ module c1541_logic
 	output       act			   // activity LED
 );
 
+(* MARK_DEBUG = "TRUE" *) wire iec_clk_i;
+assign iec_clk_i = iec_clk_in;
+
+(* MARK_DEBUG = "TRUE" *) wire iec_data_i;
+assign iec_data_i = iec_data_in;
+
+(* MARK_DEBUG = "TRUE" *) wire iec_atn_i;
+assign iec_atn_i = iec_atn_in;
+
+(* MARK_DEBUG = "TRUE" *) wire [1:0] ds_i;
+assign ds_i = ds;
+
+(* MARK_DEBUG = "TRUE" *) wire sync_n_i;
+assign sync_n_i = sync_n;
+
+(* MARK_DEUG = "TRUE" *) wire byte_n_i;
+assign byte_n_i = byte_n;
+
+(* MARK_DEBUG = "TRUE" *) wire wps_n_i;
+assign wps_n_i = wps_n;
+
 assign rom_addr = cpu_a[14:0];
 
 //same decoder as on real HW
@@ -57,7 +78,7 @@ wire uc1_cs     = ls42 == 6;
 wire uc3_cs     = ls42 == 7;
 wire rom_cs     = cpu_a[15];
 
-wire  [7:0] cpu_di =
+(* MARK_DEBUG = "TRUE" *) wire  [7:0] cpu_di =
 	!cpu_rw    ? cpu_do :
 	 ram_cs    ? ram_do :
 	 uc1_cs    ? uc1_do :
@@ -67,10 +88,14 @@ wire  [7:0] cpu_di =
 	 8'hFF;
 
 wire [23:0] cpu_a;
-wire  [7:0] cpu_do;
-wire        cpu_rw;
-wire        cpu_irq_n = ~(uc1_irq | uc3_irq);
-wire        cpu_so_n = byte_n | ~soe;
+(* MARK_DEBUG = "TRUE" *) wire [15:0] cpu_addr;
+assign cpu_addr = cpu_a[15:0];
+(* MARK_DEBUG = "TRUE" *) wire  [7:0] cpu_do;
+(* MARK_DEBUG = "TRUE" *) wire        cpu_rw;
+(* MARK_DEBUG = "TRUE" *) wire        cpu_irq_n = ~(uc1_irq | uc3_irq);
+(* MARK_DEBUG = "TRUE" *) wire        cpu_so_n = byte_n | ~soe;
+(* MARK_DEBUG = "TRUE" *) wire        cpu_regs_dbg;
+assign cpu_regs_dbg = cpu_regs; 
 
 T65 cpu 
 (
@@ -86,7 +111,8 @@ T65 cpu
 	.r_w_n(cpu_rw),
 	.a(cpu_a),
 	.din(cpu_di),    //changed to "din" due to the issue described in T65.vhd, section "March, 2 2022"
-	.dout(cpu_do)    //changed to "dout", ditto.
+	.dout(cpu_do),   //changed to "dout", ditto.
+	.regs(cpu_regs)
 );
 
 wire extram_cs = ext_en && (cpu_a[15:13] == 'b100);
@@ -133,6 +159,11 @@ wire       uc1_cb2_oe;
 
 assign     iec_data_out = ~(uc1_pb_o[1] | ~uc1_pb_oe[1]) & ~((uc1_pb_o[4] | ~uc1_pb_oe[4]) ^ ~iec_atn_in);
 assign     iec_clk_out  = ~(uc1_pb_o[3] | ~uc1_pb_oe[3]);
+
+(* MARK_DEBUG = "TRUE" *) wire iec_data_o;
+assign      iec_data_o  = ~(uc1_pb_o[1] | ~uc1_pb_oe[1]) & ~((uc1_pb_o[4] | ~uc1_pb_oe[4]) ^ ~iec_atn_in);
+(* MARK_DEBUG = "TRUE" *) wire iec_clk_o;
+assign      iec_clk_o   = ~(uc1_pb_o[3] | ~uc1_pb_oe[3]);
 
 assign     par_stb_out  = uc1_ca2_o | ~uc1_ca2_oe;
 assign     par_data_out = uc1_pa_o  | ~uc1_pa_oe;
