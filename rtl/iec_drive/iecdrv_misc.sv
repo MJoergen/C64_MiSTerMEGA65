@@ -141,7 +141,7 @@ end else begin // QNICE expects the data to flow instantly on the falling edge, 
 end
 
 reg                 wren_b_d;
-reg [ADDRWIDTH+2:0] address_b_d;
+reg [ADDRWIDTH-1:0] address_b_d;
 
 if (FALLING_B == 1'b0) begin
    always @(posedge clock_b) begin
