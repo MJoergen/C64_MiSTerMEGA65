@@ -68,11 +68,8 @@ iecdrv_sync #(NDR) rst_sync(clk, reset, reset_drv);
 
 wire stdrom = (DUALROM || PARPORT) ? rom_std : 1'b1;
 
-(* MARK_DEBUG = "TRUE" *) wire drv_ce_i;
-assign drv_ce_i = ce; 
-
-(* MARK_DEBUG = "TRUE" *) reg ph2_r;
-(* MARK_DEBUG = "TRUE" *) reg ph2_f;
+reg ph2_r;
+reg ph2_f;
 always @(posedge clk) begin
 	reg [3:0] div;
 	reg       ena, ena1;
