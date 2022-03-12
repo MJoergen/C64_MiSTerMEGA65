@@ -77,7 +77,7 @@ architecture Gideon of iecdrv_via6522 is
     signal port_b_c      : std_logic_vector(7 downto 0) := (others => '0');
     
     signal irq_mask      : std_logic_vector(6 downto 0) := (others => '0');
-    signal irq_flags     : std_logic_vector(6 downto 0) := (others => '0');
+    signal irq_flags     : std_logic_vector(5 downto 0) := (others => '0');
     signal irq_events    : std_logic_vector(6 downto 0) := (others => '0');
     signal irq_out       : std_logic;
     
@@ -87,7 +87,7 @@ architecture Gideon of iecdrv_via6522 is
     signal timer_b_count : std_logic_vector(15 downto 0) := latch_reset_pattern;
     signal timer_a_out   : std_logic;
     signal timer_b_tick  : std_logic;
-                         
+                               
     signal acr, pcr      : std_logic_vector(7 downto 0) := X"00";
     signal shift_reg     : std_logic_vector(7 downto 0) := X"00";
     signal serport_en    : std_logic;
@@ -112,7 +112,8 @@ architecture Gideon of iecdrv_via6522 is
     alias  cb2_flag      : std_logic is irq_flags(3);
     alias  cb1_flag      : std_logic is irq_flags(4);
     alias  timer_b_flag  : std_logic is irq_flags(5);
-    alias  timer_a_flag  : std_logic is irq_flags(6);
+--    alias  timer_a_flag  : std_logic is irq_flags(6);
+    signal timer_a_flag  : std_logic;
 
     alias tmr_a_output_en   : std_logic is acr(7);
     alias tmr_a_freerun     : std_logic is acr(6);
@@ -184,9 +185,9 @@ begin
         '0'             when "10",
         '1'             when others;
 
-    process(irq_flags, irq_mask)
+    process(all)
     begin
-        if (irq_flags and irq_mask) = "0000000" then
+        if ((timer_a_flag & irq_flags(5 downto 0)) and irq_mask) = "0000000" then
             irq_out <= '0';
         else
             irq_out <= '1';
@@ -271,7 +272,8 @@ begin
             end if;
 
             -- Interrupt logic
-            irq_flags <= irq_flags or irq_events;
+            timer_a_flag <= timer_a_flag or irq_events(6);
+            irq_flags(5 downto 0) <= irq_flags(5 downto 0) or irq_events(5 downto 0);
             
             -- Writes --
             if wen='1' and falling = '1' then
@@ -326,7 +328,8 @@ begin
                     pcr <= data_in;
                                     
                 when X"D" => -- IFR
-                    irq_flags <= irq_flags and not data_in(6 downto 0);
+                    timer_a_flag <= timer_a_flag and not data_in(6);
+                    irq_flags(5 downto 0) <= irq_flags(5 downto 0) and not data_in(5 downto 0);
                     
                 when X"E" => -- IER
                     if data_in(7)='1' then -- set
@@ -377,7 +380,7 @@ begin
             when X"C" => -- PCR
                 data_out  <= pcr;
             when X"D" => -- IFR
-                data_out  <= irq_out & irq_flags;
+                data_out  <= irq_out & timer_a_flag & irq_flags(5 downto 0);
             when X"E" => -- IER
                 data_out  <= '1' & irq_mask;
             when X"F" => -- ORA
@@ -419,6 +422,7 @@ begin
                 pio_i         <= pio_default;
                 irq_mask      <= (others => '0');
                 irq_flags     <= (others => '0');
+                timer_a_flag  <= '0';
                 acr           <= (others => '0');
                 pcr           <= (others => '0');
                 ca2_handshake_o <= '1';
