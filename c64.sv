@@ -33,7 +33,7 @@ module emu
 	input         RESET,
 
 	//Must be passed to hps_io module
-	inout  [45:0] HPS_BUS,
+	inout  [48:0] HPS_BUS,
 
 	//Base video clock. Usually equals to CLK_SYS.
 	output        CLK_VIDEO,
@@ -1227,6 +1227,11 @@ always @(posedge CLK_VIDEO) begin
 		if(HDMI_HEIGHT == 800)  begin vcrop <= 200; wide <= vcrop_en; end
 		if(HDMI_HEIGHT == 1080) vcrop <= 10'd216;
 		if(HDMI_HEIGHT == 1200) vcrop <= 240;
+	end
+	else if(HDMI_WIDTH >= 1440 && !scandoubler) begin
+		// 1920x1440 and 2048x1536 are 4:3 resolutions and won't fit in the previous if statement ( width > height * 1.5 )
+		if(HDMI_HEIGHT == 1440) vcrop <= 240;
+		if(HDMI_HEIGHT == 1536) vcrop <= 256;
 	end
 end
 

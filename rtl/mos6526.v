@@ -19,8 +19,11 @@ module mos6526 (
 
   input  wire [7:0] pa_in,
   output reg  [7:0] pa_out,
+  output      [7:0] pa_oe,
+
   input  wire [7:0] pb_in,
   output reg  [7:0] pb_out,
+  output      [7:0] pb_oe,
 
   input  wire       flag_n,
   output reg        pc_n,
@@ -109,6 +112,9 @@ always @(posedge clk) begin
       4'hf: db_out <= {crb[7:5], 1'b0, crb[3:0]};
     endcase
 end
+
+assign pa_oe = ddra;
+assign pb_oe = ddrb;
 
 // Port A Output
 always @(posedge clk) begin
@@ -458,9 +464,9 @@ always @(posedge clk) begin
     end
 
     if (phi2_p) begin
+		if(int_reset) icr[3] <= 1'b0;
 		if(icr3) icr[3] <= 1'b1;
 		icr3 <= 1'b0;
-		if(int_reset) icr[3] <= 1'b0;
     end
   end
 end
@@ -468,7 +474,7 @@ end
 // CNT Input/Output
 always @(posedge clk) begin
   if (!res_n) begin
-    cnt_out_r    <= 1'b1;
+    cnt_out_r <= 1'b1;
     cnt_out      <= 1'b1;
     cnt_pulsecnt <= 3'h0;
   end
