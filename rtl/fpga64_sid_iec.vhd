@@ -756,7 +756,7 @@ iec_atn_o  <= not cia2_pao(3);
 pb_o  <= cia2_pbo;
 pa2_o <= cia2_pao(2);
 
-process(clk32)
+process(all)
    variable sum       : natural;
    variable sum_max   : natural;
    variable add_value : natural;
