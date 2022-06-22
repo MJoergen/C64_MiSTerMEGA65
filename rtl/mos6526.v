@@ -458,9 +458,9 @@ always @(posedge clk) begin
     end
 
     if (phi2_p) begin
+		if(int_reset) icr[3] <= 1'b0;
 		if(icr3) icr[3] <= 1'b1;
 		icr3 <= 1'b0;
-		if(int_reset) icr[3] <= 1'b0;
     end
   end
 end
