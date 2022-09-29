@@ -22,6 +22,7 @@ module reu
 	output reg  [7:0] ram_dout,
 	input       [7:0] ram_din,
 	output reg        ram_we,
+	output reg        ram_cs,
 	
 	input      [15:0] cpu_addr,
 	input       [7:0] cpu_dout,
@@ -92,6 +93,7 @@ always @(posedge clk) begin : label1
 		dma_req    <= 0;
 		dma_we_r   <= 0;
 		ram_we     <= 0;
+		ram_cs     <= 0;
 		cpu_din    <= 'hFF;
 		state      <= STATE_IDLE;
 	end
@@ -169,6 +171,7 @@ always @(posedge clk) begin : label1
 					end
 					else if(op_dev) begin
 						if (~ram_cycle) begin
+							ram_cs    <= 1'b1;
 							ram_addr  <= {1'b1, addr_ram};
 							ram_we    <= op_act[0];
 							ram_dout  <= data[op_dat];
@@ -189,6 +192,7 @@ always @(posedge clk) begin : label1
 				if(ram_cycle) begin
 					cnt    <= cnt + 1'd1;
 					if(&cnt[1:0]) begin
+						ram_cs       <= 0;
 						data[op_dat] <= ram_din;
 						ram_we       <= 0;
 						stage        <= stage + 1'd1;
