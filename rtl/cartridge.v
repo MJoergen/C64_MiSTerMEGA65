@@ -38,6 +38,8 @@ module cartridge
 	input      [15:0] addr_in,             // address from cpu
 	input       [7:0] data_in,  			   // data from cpu going to sdram
 	output reg [24:0] addr_out, 	         // translated address output
+    output reg  [6:0] bank_lo,
+    output reg  [6:0] bank_hi,
 
 	input             freeze_key,
 	input             mod_key,
@@ -45,8 +47,6 @@ module cartridge
 	input             nmi_ack
 );
 
-reg  [6:0] bank_lo;
-reg  [6:0] bank_hi;
 reg [12:0] mask_lo;
 
 reg [13:0] geo_bank;
