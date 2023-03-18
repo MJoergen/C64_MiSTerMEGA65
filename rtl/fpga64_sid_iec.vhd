@@ -339,7 +339,8 @@ end component;
 
 attribute MARK_DEBUG : string;
 attribute MARK_DEBUG of cpuDi       : signal is "TRUE";
-attribute MARK_DEBUG of cpuAddr_pre : signal is "TRUE";
+--attribute MARK_DEBUG of cpuAddr_pre : signal is "TRUE";
+attribute MARK_DEBUG of systemAddr  : signal is "TRUE";
 attribute MARK_DEBUG of cpuDo_pre   : signal is "TRUE";
 attribute MARK_DEBUG of cpuWe_pre   : signal is "TRUE";
 
