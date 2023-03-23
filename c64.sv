@@ -502,29 +502,29 @@ cartridge cartridge
 	.cart_bank_raddr(ioctl_load_addr),
 	.cart_bank_wr(cart_hdr_wr),
 
-	.exrom(exrom),
-	.game(game),
+	.exrom(exrom),              // output
+	.game(game),                // output
 
-	.romL(romL),
-	.romH(romH),
-	.UMAXromH(UMAXromH),
-	.IOE(IOE),
-	.IOF(IOF),
-	.mem_write(ram_we),
-	.mem_ce(ram_ce),
-	.mem_ce_out(cart_ce),
-	.mem_write_out(cart_we),
-	.IO_rom(io_rom),
-	.IO_rd(cart_oe),
-	.IO_data(cart_data),
-	.addr_in(c64_addr),
-	.data_in(c64_data_out),
-	.addr_out(cart_addr),
+	.romL(romL),                // input
+	.romH(romH),                // input
+	.UMAXromH(UMAXromH),        // input
+	.IOE(IOE),                  // input
+	.IOF(IOF),                  // input
+	.mem_write(ram_we),         // input
+	.mem_ce(ram_ce),            // input
+	.mem_ce_out(cart_ce),       // output
+	.mem_write_out(cart_we),    // output
+	.IO_rom(io_rom),            // output
+	.IO_rd(cart_oe),            // output
+	.IO_data(cart_data),        // output
+	.addr_in(c64_addr),         // input
+	.data_in(c64_data_out),     // input
+	.addr_out(cart_addr),       // output
 
-	.freeze_key(freeze_key),
-	.mod_key(mod_key),
-	.nmi(nmi),
-	.nmi_ack(nmi_ack)
+	.freeze_key(freeze_key),    // input
+	.mod_key(mod_key),          // input
+	.nmi(nmi),                  // output
+	.nmi_ack(nmi_ack)           // input
 );
 
 wire        dma_req;
