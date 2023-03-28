@@ -407,6 +407,16 @@ begin
 	end if;
 end process;
 
+phi0 <= phi0_cpu;
+
+-- phi2 is meant to be a phase-shifted (delayed) version of phi0.
+-- According to measurements (https://mansfield-devine.com/speculatrix/2018/04/6502-more-fun-with-clocks/)
+-- phi2 lag about 9ns. The delay mainly exists to make sure that external devices keep their bus drivers
+-- enabled for a few more nanoseconds, so the 6502/6510 can read the bus.
+-- With our ~32 MHz clock frequency, the smallest step that we have is ~31.25ns which seems to be too much.
+-- So for now we round down the 9ns to 0ns and make phi2 = phi0.
+phi2 <= phi0_cpu;
+
 process(clk32)
 begin
 	if rising_edge(clk32) then
@@ -421,10 +431,8 @@ begin
 		when CYCLE_CPUE =>
 			enableVic <= '1';
 		when CYCLE_CPUC =>
-			phi2 <= '0';
 			enableCia_n <= '1';
 		when CYCLE_CPUF =>
-			phi2 <= '1';
 			enableCia_p <= '1';
 			enableSid <= '1';
 		when others =>
@@ -622,8 +630,6 @@ begin
 		end if;
 	end if;
 end process;
-
-phi0 <= phi0_cpu;
 
 -- emulate only the first glitch (enough for Undead from Emulamer)
 vicAddr(15 downto 14) <= "11" when ((vicAddr1514 xor not cia2_pao(1 downto 0)) = "11") and (cia2_pao(0) /= cia2_pao(1)) else not unsigned(cia2_pao(1 downto 0));
