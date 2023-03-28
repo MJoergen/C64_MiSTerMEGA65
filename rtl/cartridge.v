@@ -38,8 +38,8 @@ module cartridge
 	input      [15:0] addr_in,             // address from cpu
 	input       [7:0] data_in,  			   // data from cpu going to sdram
 	output reg [24:0] addr_out, 	         // translated address output
-    output reg [21:0] bank_lo,
-    output reg [21:0] bank_hi,
+    output reg  [6:0] bank_lo,
+    output reg  [6:0] bank_hi,
 
 	input             freeze_key,
 	input             mod_key,
@@ -60,8 +60,8 @@ reg        game_overide;
 assign     exrom = exrom_overide |  force_ultimax;
 assign     game  = game_overide  & ~force_ultimax;
 
-(* ramstyle = "logic" *) reg [21:0] lobanks[0:63];
-(* ramstyle = "logic" *) reg [21:0] hibanks[0:63];
+(* ramstyle = "logic" *) reg [6:0] lobanks[0:63];
+(* ramstyle = "logic" *) reg [6:0] hibanks[0:63];
 
 reg  [7:0] bank_cnt;
 always @(posedge clk32) begin : label0
@@ -73,10 +73,10 @@ always @(posedge clk32) begin : label0
 		bank_cnt <= bank_cnt + 1'd1;
 		if(cart_bank_num<64) begin
 			if(cart_bank_laddr <= 'h8000) begin
-				lobanks[cart_bank_num[5:0]] <= cart_bank_raddr[21:0];
-				if(cart_bank_size > 'h2000) hibanks[cart_bank_num[5:0]] <= cart_bank_raddr[21:0]+'h1000;
+				lobanks[cart_bank_num[5:0]] <= cart_bank_raddr[19:13];
+				if(cart_bank_size > 'h2000) hibanks[cart_bank_num[5:0]] <= cart_bank_raddr[19:13]+1'd1;
 			end
-			else hibanks[cart_bank_num[5:0]] <= cart_bank_raddr[21:0];
+			else hibanks[cart_bank_num[5:0]] <= cart_bank_raddr[19:13];
 		end
 	end
 end
@@ -699,8 +699,8 @@ assign mem_ce_out = mem_ce | (cs_ioe & stb_ioe) | (cs_iof & stb_iof);
 //RAM banks are mapped to 0x010000 (64K max)
 //ROM banks are mapped to 0x100000 (1MB max)
 function [7:0] get_bank;
-	input [21:0] bank;
-	input        ram;
+	input [6:0] bank;
+	input       ram;
 begin
 	get_bank = ram ? {5'b00001, bank[2:0]} : {1'b1, bank[6:0]};
 end
@@ -717,8 +717,8 @@ always begin
 	addr_out = addr_in;
 
 	if(reset_n) begin
-		if(romH & (romH_we | ~mem_write)) addr_out =  get_bank(bank_hi, romH_we);
-		if(romL & (romL_we | ~mem_write)) addr_out =  get_bank(bank_lo, romL_we) + addr_in[12:0] & mask_lo;
+		if(romH & (romH_we | ~mem_write)) addr_out[24:13] =  get_bank(bank_hi, romH_we);
+		if(romL & (romL_we | ~mem_write)) addr_out        = {get_bank(bank_lo, romL_we), addr_in[12:0] & mask_lo};
 
 		if(cs_ioe) addr_out[24:13] = get_bank(IOE_bank, IOE_wr_ena); // read/write to DExx
 		if(cs_iof) addr_out[24:13] = get_bank(IOF_bank, IOF_wr_ena); // read/write to DFxx
