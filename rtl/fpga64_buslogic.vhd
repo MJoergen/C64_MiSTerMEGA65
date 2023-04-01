@@ -18,6 +18,16 @@
 -- Original Kernel replaced by JiffyDos
 -- -----------------------------------------------------------------------
 
+-- -----------------------------------------------------------------------
+-- sy2002 04/02/2023
+--
+-- In Ultimax mode, also writing to E000 to FFFF needs to trigger ROMH,
+-- in contrast to the "read-only" logic that was implemented before.
+-- For example EasyFlash 1CR needs this capability.
+-- This fix uses /* and */ comments to make the change visible and 
+-- therefore VHDL-2008 is needed.
+-- -----------------------------------------------------------------------
+
 library IEEE;
 USE ieee.std_logic_1164.ALL;
 USE ieee.numeric_std.ALL;
@@ -278,7 +288,7 @@ begin
 			currentAddr <= cpuAddr;
 			case cpuAddr(15 downto 12) is
 			when X"E" | X"F" =>
-				if ultimax = '1' and cpuWe = '0' then
+				if ultimax = '1' /* and cpuWe = '0' commented out by sy2002 on 4/2/23 */ then
 					-- ULTIMAX MODE - drop out the kernal - LCA
 					cs_romHLoc <= '1';
 				elsif ultimax = '1' then
