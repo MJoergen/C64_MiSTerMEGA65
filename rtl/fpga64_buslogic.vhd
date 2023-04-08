@@ -18,6 +18,30 @@
 -- Original Kernel replaced by JiffyDos
 -- -----------------------------------------------------------------------
 
+-- -----------------------------------------------------------------------
+-- sy2002 04/07/2023
+--
+-- When implementing support for actual hardware cartridges for the
+-- MEGA65's Expansion Port, we fixed several bugs where this simulation
+-- was not in line with the behavior of the real PLA as described in
+-- "The C64 PLA Dissected", Revision 1.1 by Thomas 'skoe' Giesel
+--
+-- 1. In Ultimax mode, writing to E000 to FFFF needs to trigger cs_romH,
+--    in contrast to the "read-only" logic that was implemented before.
+--    For example EasyFlash 1CR needs this capability.
+--
+-- 2. In non-Ultimax modes, the C64 can never write to the cartridge's
+--    memory space 8000..9FFF and A000..BFFF (but read from it) while
+--    in Ultimax mode it always can read and write.
+--
+-- 3. Implemented the correct aec dependencies for cs_romL, cs_romH
+--    and cs_UMAXromH
+--
+-- 4. Fixed outside of this file: The chip select / chip enable for the
+--    RAM is wrong: It selects the RAM in situations where it must
+--    absolutely not be selected.
+-- -----------------------------------------------------------------------
+
 library IEEE;
 USE ieee.std_logic_1164.ALL;
 USE ieee.numeric_std.ALL;
@@ -278,11 +302,11 @@ begin
 			currentAddr <= cpuAddr;
 			case cpuAddr(15 downto 12) is
 			when X"E" | X"F" =>
-				if ultimax = '1' and cpuWe = '0' then
+				if ultimax = '1' /* and cpuWe = '0' commented out by sy2002 on 4/2/23 */ then
 					-- ULTIMAX MODE - drop out the kernal - LCA
 					cs_romHLoc <= '1';
-				elsif ultimax = '1' then
-					cs_UMAXnomapLoc <= '1';
+				/* elsif ultimax = '1' then
+					cs_UMAXnomapLoc <= '1'; */
 				elsif cpuWe = '0' and bankSwitch(1) = '1' then
 					-- Read kernal
 					cs_romLoc <= '1';
@@ -323,9 +347,8 @@ begin
 				end if;
 			when X"A" | X"B" =>
 				if ultimax = '1' then
-					cs_UMAXnomapLoc <= '1';
-				elsif exrom = '0' and game = '0' and bankSwitch(1) = '1' then
-				  -- this case should write to both C64 RAM and Cart RAM (if RAM is connected)
+					cs_romHLoc <= '1';
+				elsif exrom = '0' and game = '0' and bankSwitch(1) = '1' and cpuWe = '0' then -- 4/7/23 added and cpuWE = '0' by sy2002 
 					cs_romHLoc <= '1';
 				elsif ultimax = '0' and cpuWe = '0' and bankSwitch(1) = '1' and bankSwitch(0) = '1' then
 					-- Access basic rom
@@ -336,10 +359,8 @@ begin
 				end if;
 			when X"8" | X"9" =>
 				if ultimax = '1' then
-					-- pass cpuWe to cartridge. Cartridge must block writes if no RAM connected.
 					cs_romLLoc <= '1';
-				elsif exrom = '0' and bankSwitch(1) = '1' and bankSwitch(0) = '1' then
-				  -- this case should write to both C64 RAM and Cart RAM (if RAM is connected)
+				elsif exrom = '0' and bankSwitch(1) = '1' and bankSwitch(0) = '1' and cpuWe = '0' then -- 4/7/23 added and cpuWE = '0' by sy2002
 					cs_romLLoc <= '1';
 				else
 					cs_ramLoc <= '1';
@@ -375,7 +396,13 @@ begin
 		end if;
 	end process;
 
+   -- 4/7/23 by sy2002: This is not really a chip-select for the RAM because it would also select the RAM when
+   -- other chips such as the character ROM or cartridge RAMs/ROMs are selected. Due to a quirk in fpga64_sid_iec.vhd
+   -- where the CPU's clock speed (via chip enable) is determined via this cs_ram signal, we cannot improve this
+   -- without a larger refactoring. So the solution is to clean up the signal outside of fpga64_buslogic.vhd
+   -- and inside fpga64_sid_iec.vhd: Search for: 4/7/23 by sy2002: added "and (romL = '0' and romH = '0' and UMAXromH = '0')"
 	cs_ram <= cs_ramLoc or cs_romLLoc or cs_romHLoc or cs_UMAXromHLoc or cs_UMAXnomapLoc or cs_CharLoc or cs_romLoc;
+	
 	cs_vic <= cs_vicLoc and io_enable;
 	cs_sid <= cs_sidLoc and io_enable;
 	cs_color <= cs_colorLoc and io_enable;
@@ -383,9 +410,9 @@ begin
 	cs_cia2 <= cs_cia2Loc and io_enable;
 	cs_ioE <= cs_ioELoc and io_enable;
 	cs_ioF <= cs_ioFLoc and io_enable;
-	cs_romL <= cs_romLLoc;
-	cs_romH <= cs_romHLoc;
-	cs_UMAXromH <= cs_UMAXromHLoc;
+	cs_romL <= cs_romLLoc and not aec;       -- 4/7/23 added and not aec by sy2002
+	cs_romH <= cs_romHLoc and not aec;       -- 4/7/23 added and not aec by sy2002
+	cs_UMAXromH <= cs_UMAXromHLoc and aec;   -- 4/7/23 added and aec by sy2002
 
 	dataToVic  <= unsigned(charData) when vicCharLoc = '1' else ramData;
 	systemAddr <= currentAddr;
