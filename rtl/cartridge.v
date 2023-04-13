@@ -54,6 +54,7 @@ reg  [6:0] IOE_bank;
 reg  [6:0] IOF_bank;
 reg        IOE_wr_ena;
 reg        IOF_wr_ena;
+reg  force_ultimax;
 
 reg        exrom_overide;
 reg        game_overide;
@@ -118,15 +119,14 @@ reg  ram_bank;
 reg  reu_map;
 reg  clock_port;
 reg  rom_kbb;
-reg  force_ultimax;
 
 // 0018 - EXROM line status
 // 0019 - GAME line status
 
 always @(posedge clk32) begin : label1
-	reg        init_n = 0;
-	reg        allow_freeze = 0;
-	reg        saved_d6 = 0;
+	reg        init_n;
+	reg        allow_freeze;
+	reg        saved_d6;
 	reg [15:0] count;
 	reg        count_ena;
 	reg [15:0] old_id;
@@ -706,7 +706,7 @@ begin
 end
 endfunction
 
-always begin
+always @* begin
 	IOE_rd = 0;
 	IOF_rd = 0;
 	IO_data = 8'hFF;
