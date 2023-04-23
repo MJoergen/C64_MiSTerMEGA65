@@ -340,22 +340,22 @@ component mos6526
 end component; 
 
 attribute MARK_DEBUG : string;
-attribute MARK_DEBUG of cpuDi       : signal is "TRUE";
+attribute MARK_DEBUG of baLoc       : signal is "TRUE";
 attribute MARK_DEBUG of cpuAddr_pre : signal is "TRUE";
-attribute MARK_DEBUG of systemAddr  : signal is "TRUE";
+attribute MARK_DEBUG of cpuDi       : signal is "TRUE";
 attribute MARK_DEBUG of cpuDo_pre   : signal is "TRUE";
-attribute MARK_DEBUG of cpuWe_pre   : signal is "TRUE";
-
-attribute MARK_DEBUG of sysCycle    : signal is "TRUE";
 attribute MARK_DEBUG of cpuHasBus   : signal is "TRUE";
+attribute MARK_DEBUG of cpuIO       : signal is "TRUE";
+attribute MARK_DEBUG of cpuWe_pre   : signal is "TRUE";
+attribute MARK_DEBUG of ext_cycle   : signal is "TRUE";
+attribute MARK_DEBUG of io_cycle    : signal is "TRUE";
 attribute MARK_DEBUG of ramAddr     : signal is "TRUE";
+attribute MARK_DEBUG of ramCE       : signal is "TRUE";
 attribute MARK_DEBUG of ramDin      : signal is "TRUE";
 attribute MARK_DEBUG of ramDout     : signal is "TRUE";
-attribute MARK_DEBUG of ramCE       : signal is "TRUE";
 attribute MARK_DEBUG of ramWE       : signal is "TRUE";
-attribute MARK_DEBUG of io_cycle    : signal is "TRUE";
-attribute MARK_DEBUG of ext_cycle   : signal is "TRUE";
-attribute MARK_DEBUG of baLoc       : signal is "TRUE";
+attribute MARK_DEBUG of sysCycle    : signal is "TRUE";
+attribute MARK_DEBUG of systemAddr  : signal is "TRUE";
 
 begin
 
