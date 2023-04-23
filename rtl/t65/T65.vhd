@@ -270,6 +270,9 @@ architecture rtl of T65 is
 
   signal NMI_entered    : std_logic;
 
+attribute MARK_DEBUG : string;
+attribute MARK_DEBUG of Sync : signal is "TRUE";
+
 begin
   NMI_ack <= NMIAct;
 
