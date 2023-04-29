@@ -50,10 +50,11 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	output reg [7:0] sd_buff_din[NDR],
 	input         sd_buff_wr,
 
-	input  [15:0] rom_addr,
-	input   [7:0] rom_data,
-	input         rom_wr,
-	input         rom_std
+	input  [15:0] rom_addr_i,
+	input   [7:0] rom_data_i,
+	output  [7:0] rom_data_o,
+	input         rom_wr_i,
+	input         rom_std_i
 );
 
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
@@ -108,10 +109,11 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 	.clk_sys(clk_sys),
 	.pause(pause),
 
-	.rom_addr(rom_addr[14:0]),
-	.rom_data(rom_data),
-	.rom_wr(~rom_addr[15] & rom_wr),
-	.rom_std(rom_std),
+	.rom_addr_i(rom_addr_i[14:0]),
+	.rom_data_i(rom_data_i),
+	.rom_data_o(rom_data_o),
+	.rom_wr_i(~rom_addr_i[15] & rom_wr_i),
+	.rom_std_i(rom_std_i),
 
 	.img_mounted(img_mounted),
 	.img_size(img_size),

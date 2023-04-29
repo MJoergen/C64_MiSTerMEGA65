@@ -49,10 +49,11 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	output  [7:0] sd_buff_din[NDR],
 	input         sd_buff_wr,
 
-	input  [14:0] rom_addr,
-	input   [7:0] rom_data,
-	input         rom_wr,
-	input         rom_std
+	input  [14:0] rom_addr_i,
+	input   [7:0] rom_data_i,
+	output  [7:0] rom_data_o,
+	input         rom_wr_i,
+	input         rom_std_i
 );
 
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
@@ -66,7 +67,7 @@ iecdrv_sync clk_sync(clk, iec_clk_i,  iec_clk);
 wire [N:0] reset_drv;
 iecdrv_sync #(NDR) rst_sync(clk, reset, reset_drv);
 
-wire stdrom = (DUALROM || PARPORT) ? rom_std : 1'b1;
+wire stdrom = (DUALROM || PARPORT) ? rom_std_i : 1'b1;
 
 reg ph2_r;
 reg ph2_f;
@@ -95,11 +96,11 @@ end
 reg rom_32k_i;
 reg rom_16k_i;
 reg empty8k;
-always @(posedge clk_sys) begin
-	if (rom_wr & !rom_addr) empty8k = 1;
-	if (rom_wr & |rom_data & ~&rom_data) begin
-		{rom_32k_i,rom_16k_i} <= rom_addr[14:13];
-		if(rom_addr[14:8] && !rom_addr[14:13]) empty8k = 0;
+always @(negedge clk_sys) begin
+	if (rom_wr_i & !rom_addr_i) empty8k = 1;
+	if (rom_wr_i & |rom_data_i & ~&rom_data_i) begin
+		{rom_32k_i,rom_16k_i} <= rom_addr_i[14:13];
+		if(rom_addr_i[14:8] && !rom_addr_i[14:13]) empty8k = 0;
 	end
 end
 
@@ -125,9 +126,10 @@ generate
 		iecdrv_mem #(8,14,"./c1541_rom.mif") rom
 		(
 			.clock_a(clk_sys),
-			.address_a(rom_addr[13:0]),
-			.data_a(rom_data),
-			.wren_a(rom_wr),
+			.address_a(rom_addr_i[13:0]),
+			.data_a(rom_data_i),
+			.wren_a(rom_wr_i),
+			.q_a(rom_data_o),
 
 			.clock_b(clk),
 			.address_b(mem_a[13:0]),
@@ -147,9 +149,10 @@ iecdrv_mem_rom #(
    .FALLING_A(1'b1)
 ) romstd (
 	.clock_a(clk_sys),
-	.address_a(rom_addr[13:0]),
-	.data_a(rom_data),
-	.wren_a((DUALROM || PARPORT) ? 1'b0 : rom_wr),
+	.address_a(rom_addr_i[13:0]),
+	.data_a(rom_data_i),
+	.wren_a((DUALROM || PARPORT) ? 1'b0 : rom_wr_i),
+	.q_a(rom_data_o),
 
 	.clock_b(clk),
 	.address_b(mem_a[13:0]),

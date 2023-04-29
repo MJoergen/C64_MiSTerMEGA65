@@ -50,6 +50,12 @@ entity fpga64_buslogic is
 	port (
 		clk         : in std_logic;
 		reset       : in std_logic;
+		
+		-- Select C64's ROM:
+		-- 0 Custom
+		-- 1 Standard
+		-- 2 GS
+		-- 3 Japan
 		bios        : in std_logic_vector(1 downto 0);
 
 		cpuHasBus   : in std_logic;
@@ -68,11 +74,7 @@ entity fpga64_buslogic is
 		io_rom      : in std_logic;
 		io_ext      : in std_logic;
 		io_data     : in unsigned(7 downto 0);
-
-		c64rom_addr : in std_logic_vector(13 downto 0);
-		c64rom_data : in std_logic_vector(7 downto 0);
-		c64rom_wr   : in std_logic;
-
+		
 		cpuWe       : in std_logic;
 		cpuAddr     : in unsigned(15 downto 0);
 		cpuData     : in unsigned(7 downto 0);
@@ -103,7 +105,14 @@ entity fpga64_buslogic is
 		cs_ioF      : out std_logic;
 		cs_romL     : out std_logic;
 		cs_romH     : out std_logic;
-		cs_UMAXromH : out std_logic
+		cs_UMAXromH : out std_logic;
+		
+		-- Custom Kernal
+      c64rom_clk_i    : in std_logic;
+      c64rom_we_i     : in std_logic;
+		c64rom_addr_i   : in std_logic_vector(13 downto 0);
+		c64rom_data_i   : in std_logic_vector(7 downto 0);
+		c64rom_data_o   : out std_logic_vector(7 downto 0)		
 	);
 end fpga64_buslogic;
 
@@ -114,7 +123,7 @@ architecture rtl of fpga64_buslogic is
 	signal charData_std   : std_logic_vector(7 downto 0);
 	signal charData_jap   : std_logic_vector(7 downto 0);
 	signal romData        : std_logic_vector(7 downto 0);
-	signal romData_c64    : std_logic_vector(7 downto 0);
+	signal romData_c64_custom : std_logic_vector(7 downto 0);
 	signal romData_c64std : std_logic_vector(7 downto 0);
 	signal romData_c64gs  : std_logic_vector(7 downto 0);
 	signal romData_c64jap : std_logic_vector(7 downto 0);
@@ -176,21 +185,27 @@ begin
 		q => romData_c64gs
 	);
 
-	kernel_c64: entity work.dprom
-	generic map ("./roms/dol_C64.mif", 14)
-	port map
-	(
-		wrclock => clk,
-		rdclock => clk,
-
-		wren => c64rom_wr,
-		data => c64rom_data,
-		wraddress => c64rom_addr,
-
-		rdaddress => std_logic_vector(cpuAddr(14) & cpuAddr(12 downto 0)),
-		q => romData_c64
-	);
-
+   custom_kernal: entity work.dualport_2clk_ram
+   generic map
+   (
+      ADDR_WIDTH   => 14,
+      DATA_WIDTH   => 8,
+      MAXIMUM_SIZE => 16384,
+      FALLING_B    => true
+   )
+   port map
+   (
+		clock_a      => clk,
+		address_a    => std_logic_vector(cpuAddr(14) & cpuAddr(12 downto 0)),
+		q_a          => romData_c64_custom,
+		
+		clock_b      => c64rom_clk_i,
+		address_b    => c64rom_addr_i,
+		data_b       => c64rom_data_i,
+		wren_b       => c64rom_we_i,
+		q_b          => c64rom_data_o		 
+   );
+   
 	kernel_c64std: entity work.dprom
 	generic map ("./roms/std_C64.mif", 14)
 	port map
@@ -216,7 +231,7 @@ begin
 	romData <= romData_c64jap when c64jap_ena = '1' else
 				  romData_c64std when c64std_ena = '1' else
 				  romData_c64gs  when c64gs_ena  = '1' else
-				  romData_c64;
+				  romData_c64_custom;
 
 	charData <= charData_jap when c64jap_ena = '1' else charData_std;
 

@@ -41,6 +41,7 @@
 --   speeds given by the outside module (PAL/NTSC)
 -- * Added dotclk, phi0 and phi2 outputs
 -- * Fixed ramCE by respecting romL, romH and UMAXromH
+-- * Refined access to the custom Kernal
 --
 -- -----------------------------------------------------------------------
 
@@ -56,6 +57,8 @@ port(
 	clk32       : in  std_logic;
 	clk32_speed : in  natural; -- exact value; used to avoid clock drift at the time-of-day clock
 	reset_n     : in  std_logic;
+	
+   -- Select C64's ROM: 0=Custom, 1=Standard, 2=GS, 3=Japan
 	bios        : in  std_logic_vector(1 downto 0);
 	
 	pause       : in  std_logic := '0';
@@ -160,15 +163,19 @@ port(
 	iec_clk_o	: out std_logic;
 	iec_clk_i	: in  std_logic;
 	iec_atn_o	: out std_logic;
-	
-	c64rom_addr : in  std_logic_vector(13 downto 0);
-	c64rom_data : in  std_logic_vector(7 downto 0);
-	c64rom_wr   : in  std_logic;
 
+   -- Cassette drive
 	cass_motor  : out std_logic;
 	cass_write  : out std_logic;
 	cass_sense  : in  std_logic;
-	cass_read   : in  std_logic
+	cass_read   : in  std_logic;
+	
+   -- Custom Kernal
+   c64rom_clk_i    : in std_logic;
+   c64rom_we_i     : in std_logic;
+   c64rom_addr_i   : in std_logic_vector(13 downto 0);
+   c64rom_data_i   : in std_logic_vector(7 downto 0);
+   c64rom_data_o   : out std_logic_vector(7 downto 0)
 );
 end fpga64_sid_iec;
 
@@ -524,9 +531,12 @@ port map (
 	cs_romH => romH,
 	cs_UMAXromH => UMAXromH,
 
-	c64rom_addr => c64rom_addr,
-	c64rom_data => c64rom_data,
-	c64rom_wr => c64rom_wr
+   -- Access to custom ROM
+   c64rom_clk_i   => c64rom_clk_i,
+   c64rom_we_i    => c64rom_we_i,
+	c64rom_addr_i  => c64rom_addr_i,
+   c64rom_data_i  => c64rom_data_i,
+	c64rom_data_o  => c64rom_data_o		
 );
 
 IOE <= ioe_i;
