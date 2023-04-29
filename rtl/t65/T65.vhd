@@ -272,6 +272,9 @@ architecture rtl of T65 is
 
 attribute MARK_DEBUG : string;
 attribute MARK_DEBUG of Sync : signal is "TRUE";
+attribute MARK_DEBUG of ABC  : signal is "TRUE";
+attribute MARK_DEBUG of X    : signal is "TRUE";
+attribute MARK_DEBUG of Y    : signal is "TRUE";
 
 begin
   NMI_ack <= NMIAct;
