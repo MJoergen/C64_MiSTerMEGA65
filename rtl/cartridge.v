@@ -65,8 +65,8 @@ assign     game  = game_overide  & ~force_ultimax;
 (* ramstyle = "logic" *) reg [6:0] hibanks[0:63];
 
 reg  [7:0] bank_cnt;
+reg old_loading;
 always @(posedge clk32) begin : label0
-	reg old_loading;
 	old_loading <= cart_loading;
 
 	if(~old_loading & cart_loading) bank_cnt <= 0;
@@ -140,7 +140,7 @@ always @(posedge clk32) begin : label1
 	init_n <= 1;
 	old_id <= cart_id;
 
-	if(~reset_n || (old_id != cart_id)) begin
+    if(~reset_n || (old_id != cart_id) || (~old_loading & cart_loading)) begin
 		cart_disable <= 0;
 		bank_lo <= 0;
 		bank_hi <= 0;
