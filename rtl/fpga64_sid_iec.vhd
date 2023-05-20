@@ -428,7 +428,6 @@ begin
 end process;
 
 process(clk32)
-variable duty_cycle : natural range 0 to 16;
 begin
 	if rising_edge(clk32) then
 		enableVic <= '0';
@@ -439,10 +438,11 @@ begin
 		case sysCycle is
 		when CYCLE_VIC2 =>
 			enableVic <= '1';
+			phi2 <= '1';
 		when CYCLE_CPUE =>
 			enableVic <= '1';
-		when CYCLE_CPUC =>
 			phi2 <= '0';
+		when CYCLE_CPUC =>
 			enableCia_n <= '1';
 		when CYCLE_CPUF =>
 			enableCia_p <= '1';
@@ -450,16 +450,6 @@ begin
 		when others =>
 			null;
 		end case;
-
-      if sysCycle = CYCLE_CPUC then
-         duty_cycle := 0;
-      elsif phi2 = '0' then
-         duty_cycle := duty_cycle + 1;
-      end if;
-      
-      if duty_cycle = 16 then
-         phi2 <= '1';
-      end if;
 	end if;
 end process;
 
