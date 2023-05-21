@@ -5,6 +5,12 @@
 //
 // Input clock/ce 16MHz
 //
+// MEGA65 port by sy2002 in 2022 and 2023:
+//
+// Real support, incl. CDC for two different clocks: "clk" (aka "main") is the
+// core and "clk_sys" is used to write to the RAMs/ROMs and for the SD card
+// handling. Changed to registering the clk_sys at the negative clock edge 
+// as QNICE works like this.
 //-------------------------------------------------------------------------------
 
 
@@ -49,10 +55,13 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	output  [7:0] sd_buff_din[NDR],
 	input         sd_buff_wr,
 
+   // clk_sys clock domain
 	input  [14:0] rom_addr_i,
 	input   [7:0] rom_data_i,
 	output  [7:0] rom_data_o,
 	input         rom_wr_i,
+	
+	// clk clock domain
 	input         rom_std_i
 );
 
@@ -68,6 +77,8 @@ wire [N:0] reset_drv;
 iecdrv_sync #(NDR) rst_sync(clk, reset, reset_drv);
 
 wire stdrom = (DUALROM || PARPORT) ? rom_std_i : 1'b1;
+
+assign rom_data_o = (DUALROM || PARPORT) ? qnice_rom2_do : qnice_rom1_do;
 
 reg ph2_r;
 reg ph2_f;
@@ -87,15 +98,17 @@ always @(posedge clk) begin
 	end
 end
 
-initial begin
-	rom_32k_i = 1;
-	rom_16k_i = 1;
-	empty8k   = 1;
-end
-
 reg rom_32k_i;
 reg rom_16k_i;
 reg empty8k;
+
+initial begin
+	rom_32k_i = 1'b1;
+	rom_16k_i = 1'b1;
+	empty8k   = 1'b1;
+end
+
+//negedge because of QNICE
 always @(negedge clk_sys) begin
 	if (rom_wr_i & !rom_addr_i) empty8k = 1;
 	if (rom_wr_i & |rom_data_i & ~&rom_data_i) begin
@@ -105,17 +118,35 @@ always @(negedge clk_sys) begin
 end
 
 reg [1:0] rom_sz;
-always @(posedge clk) rom_sz <= {rom_32k_i,rom_32k_i|rom_16k_i}; // support for 8K/16K/32K ROM
+always @(negedge clk_sys) rom_sz <= {rom_32k_i,rom_32k_i|rom_16k_i}; // support for 8K/16K/32K ROM, negedge because of QNICE
+
+//rom_32k_i, rom16k_i, empty8k amd rom_sz are in the QNICE clock domain ("clk_sys"); we need to convert them into the main (core clk aka "clk") domain
+wire rom32k_main, rom16k_main, empty8k_main;
+wire [1:0] rom_sz_main;
+xpm_cdc_array_single #(
+   .WIDTH(5)
+) cdc_qnice2main (
+   .src_clk(clk_sys),
+   .src_in({empty8k, rom_16k_i, rom_32k_i, rom_sz}),
+   .dest_clk(clk),
+   .dest_out({empty8k_main, rom16k_main, rom32k_main, rom_sz_main})
+);
 
 wire [7:0] rom_do;
+wire [7:0] qnice_rom2_do;
 generate
 	if(PARPORT) begin
-		iecdrv_mem #(8,15,"./c1541_dolphin.mif") rom
-		(
+		iecdrv_mem #(
+		   .DATAWIDTH(8),
+		   .ADDRWIDTH(15),
+		   .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1541_dolphin.mif.hex"),
+		   .FALLING_A(1'b1)
+		) rom (
 			.clock_a(clk_sys),
-			.address_a(rom_addr),
-			.data_a(rom_data),
-			.wren_a(rom_wr),
+			.address_a(rom_addr_i),
+			.data_a(rom_data_i),
+			.wren_a(rom_wr_i),
+			.q_a(qnice_rom2_do),
 
 			.clock_b(clk),
 			.address_b(mem_a),
@@ -123,18 +154,21 @@ generate
 		);
 	end
 	else if(DUALROM) begin
-		iecdrv_mem #(8,14,"./c1541_rom.mif") rom
-		(
-			.clock_a(clk_sys),
-			.address_a(rom_addr_i[13:0]),
-			.data_a(rom_data_i),
-			.wren_a(rom_wr_i),
-			.q_a(rom_data_o),
-
-			.clock_b(clk),
-			.address_b(mem_a[13:0]),
-			.q_b(rom_do)
-		);
+      iecdrv_mem_rom #(
+         .DATAWIDTH(8),
+         .ADDRWIDTH(14),
+         .FALLING_A(1'b1)
+      ) rom (
+         .clock_a(clk_sys),
+         .address_a(rom_addr_i[13:0]),
+         .data_a(rom_data_i),
+         .wren_a(rom_wr_i),
+         .q_a(qnice_rom2_do),
+      
+         .clock_b(clk),
+         .address_b(mem_a[13:0]),
+         .q_b(rom_do)
+      );         
 	end
 	else begin
 		assign rom_do = romstd_do;
@@ -142,6 +176,7 @@ generate
 endgenerate
 
 wire [7:0] romstd_do;
+wire [7:0] qnice_rom1_do;
 iecdrv_mem_rom #(
    .DATAWIDTH(8),
    .ADDRWIDTH(14),
@@ -152,7 +187,7 @@ iecdrv_mem_rom #(
 	.address_a(rom_addr_i[13:0]),
 	.data_a(rom_data_i),
 	.wren_a((DUALROM || PARPORT) ? 1'b0 : rom_wr_i),
-	.q_a(rom_data_o),
+	.q_a(qnice_rom1_do),
 
 	.clock_b(clk),
 	.address_b(mem_a[13:0]),
@@ -170,7 +205,7 @@ always @(posedge clk) begin
 	if(ph2_f)   state <= 0;
 
 	case(state)
-		0,1,2,3: mem_a <= {drv_addr[state[1:0]][14] & rom_sz[1], drv_addr[state[1:0]][13] & (rom_sz[0] | stdrom), drv_addr[state[1:0]][12:0]};
+		0,1,2,3: mem_a <= {drv_addr[state[1:0]][14] & rom_sz_main[1], drv_addr[state[1:0]][13] & (rom_sz_main[0] | stdrom), drv_addr[state[1:0]][12:0]};
 	endcase
 	
 	case(state)
@@ -182,7 +217,7 @@ wire [N:0] iec_data_d, iec_clk_d;
 assign     iec_clk_o  = &{iec_clk_d  | reset_drv};
 assign     iec_data_o = &{iec_data_d | reset_drv};
 
-wire [N:0] ext_en = {NDR{rom_sz[1] & empty8k & ~stdrom & |PARPORT}} & ~reset_drv;
+wire [N:0] ext_en = {NDR{rom_sz_main[1] & empty8k_main & ~stdrom & |PARPORT}} & ~reset_drv;
 wire [7:0] par_data_d[NDR];
 wire [N:0] par_stb_d;
 assign     par_stb_o = &{par_stb_d | ~ext_en};
