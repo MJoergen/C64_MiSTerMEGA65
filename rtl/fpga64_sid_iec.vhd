@@ -566,10 +566,18 @@ port map (
 	ba => baLoc,
 	ba_dma => ba_dma,
 
+   -- @TODO sy2002 1/2/24: Revisit, when implementing the advanced settings, as describeed in issue 120 (https://github.com/MJoergen/C64MEGA65/issues/120)
 	mode6569 => (not ntscMode),
 	mode6567old => '0',
 	mode6567R8 => ntscMode,
 	mode6572 => '0',
+	
+	-- For now: Hardcoded to "old HMOS". Here is why: When @paich64 did a huge regression testing session
+   -- (see this link https://github.com/MiSTer-devel/C64_MiSTer/issues/160#issuecomment-1873249673),
+   -- he was using the setting "old HMOS".  
+	-- @TODO sy2002 1/2/24: Revisit, when implementing the advanced settings, as describeed in issue 120 (https://github.com/MJoergen/C64MEGA65/issues/120)
+	-- 00 - NMOS, 01 - HMOS, 10 - old HMOS
+	variant => "10",
 	
 	turbo_en => turbo_en,
 	turbo_state => turbo_state,
