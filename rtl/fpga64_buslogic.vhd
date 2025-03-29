@@ -42,6 +42,13 @@
 --    absolutely not be selected.
 -- -----------------------------------------------------------------------
 
+-- -----------------------------------------------------------------------
+-- sy2002 MM/DD/25
+--
+-- WIP fixing issue #176
+-- -----------------------------------------------------------------------
+
+
 library IEEE;
 USE ieee.std_logic_1164.ALL;
 USE ieee.numeric_std.ALL;
@@ -361,9 +368,9 @@ begin
 					end if;
 				end if;
 			when X"A" | X"B" =>
-				if ultimax = '1' then
-					cs_romHLoc <= '1';
-				elsif exrom = '0' and game = '0' and bankSwitch(1) = '1' and cpuWe = '0' then -- 4/7/23 added and cpuWE = '0' by sy2002 
+				/* if ultimax = '1' then commented out by sy2002 on 3/27/25
+					cs_romHLoc <= '1'; */
+				if exrom = '0' and game = '0' and bankSwitch(1) = '1' and cpuWe = '0' then -- 4/7/23 added and cpuWE = '0' by sy2002 
 					cs_romHLoc <= '1';
 				elsif ultimax = '0' and cpuWe = '0' and bankSwitch(1) = '1' and bankSwitch(0) = '1' then
 					-- Access basic rom
