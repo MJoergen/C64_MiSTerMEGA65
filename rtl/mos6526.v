@@ -477,7 +477,7 @@ always @(posedge clk) begin
 end
 
 // CNT Input/Output
-always @(posedge clk) begin
+always @(posedge clk) begin : label1
   reg cra6_prev;
   if (!res_n) begin
     cnt_in_r     <= 1'b1;
@@ -504,7 +504,7 @@ end
 wire [4:0] icr_adj = {icr[4:2], timer_b_int, icr[0]};
 
 // Interrupt Control
-always @(posedge clk) begin
+always @(posedge clk) begin : label2
   reg [7:0] imr_reg;
 
   if (!res_n) begin
