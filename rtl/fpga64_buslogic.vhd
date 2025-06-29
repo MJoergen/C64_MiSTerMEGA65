@@ -113,6 +113,7 @@ entity fpga64_buslogic is
 		cs_romL     : out std_logic;
 		cs_romH     : out std_logic;
 		cs_UMAXromH : out std_logic;
+		cs_UMAXnomap : out std_logic;   -- 6/29/25 sy2002: "unmapped Ultimax" indicator
 		
 		-- Custom Kernal
       c64rom_clk_i    : in std_logic;
@@ -434,7 +435,8 @@ begin
 	cs_ioF <= cs_ioFLoc and io_enable;
 	cs_romL <= cs_romLLoc and not aec;       -- 4/7/23 added and not aec by sy2002
 	cs_romH <= cs_romHLoc and not aec;       -- 4/7/23 added and not aec by sy2002
-	cs_UMAXromH <= cs_UMAXromHLoc and aec;   -- 4/7/23 added and aec by sy2002
+	cs_UMAXromH   <= cs_UMAXromHLoc and aec;   -- 4/7/23 added and aec by sy2002
+	cs_UMAXnomap  <= cs_UMAXnomapLoc;          -- 6/29/25 added by sy2002
 
 	dataToVic  <= unsigned(charData) when vicCharLoc = '1' else ramData;
 	systemAddr <= currentAddr;

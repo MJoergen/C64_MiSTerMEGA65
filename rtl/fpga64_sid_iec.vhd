@@ -105,6 +105,8 @@ port(
 	romL        : out std_logic;
 	romH        : out std_logic;
 	UMAXromH    : out std_logic;
+	UMAXnomap   : out std_logic; -- 6/29/25 by sy2002
+	
 	IOE         : out std_logic;
 	IOF         : out std_logic;
 	dotclk      : out std_logic;
@@ -501,7 +503,8 @@ port map (
 	cs_ioF => iof_i,
 	cs_romL => romL,
 	cs_romH => romH,
-	cs_UMAXromH => UMAXromH,
+	cs_UMAXromH  => UMAXromH,
+	cs_UMAXnomap => UMAXnomap, -- 6/29/25 by sy2002
 
    -- Access to custom ROM
    c64rom_clk_i   => c64rom_clk_i,
@@ -844,7 +847,10 @@ ramWE   <= systemWe when sysCycle >= CYCLE_CPU0 else '0';
 -- 4/7/23 by sy2002: added "and (romL = '0' and romH = '0' and UMAXromH = '0')"
 -- Without this addition, the chip select is active when it should not be. When working with real cartridges,
 -- this for example led to EasyProg overwriting itself while flashing a cartridge
-ramCE   <= cs_ram when (sysCycle = CYCLE_VIC0 or cpu_cyc = '1') and (romL = '0' and romH = '0' and UMAXromH = '0') else '0';
+-- 6/29/25 by sy2002: To fix https://github.com/MJoergen/C64MEGA65/issues/176, we must ensure
+-- that UMAXnomap does not trigger a RAM chip enable, so that writes go to a the cartridge's RAM for example
+-- in the case of an IDE64
+ramCE   <= cs_ram when (sysCycle = CYCLE_VIC0 or cpu_cyc = '1') and (romL = '0' and romH = '0' and UMAXromH = '0' and UMAXnomap = '0') else '0';
 
 cpu_cyc <= '1' when 
 				(sysCycle = CYCLE_CPU0 and turbo_m(0) = '1' and cs_ram = '1' ) or
