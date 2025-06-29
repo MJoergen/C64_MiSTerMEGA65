@@ -43,9 +43,15 @@
 -- -----------------------------------------------------------------------
 
 -- -----------------------------------------------------------------------
--- sy2002 MM/DD/25
+-- sy2002 3/27/25 and 06/29/25
 --
--- WIP fixing issue #176
+-- Fix GitHub issue https://github.com/MJoergen/C64MEGA65/issues/176
+--
+-- In Ultimax mode, there is an unmapped memory region $1000-$7FFF and 
+-- $C000-$CFFF that some cartridges such as the IDE64 utilize. Together
+-- with changes in fpga64_sid_iec.vhd tagged with 06/29/25, we are now
+-- ensuring that the RAM chip enable is not true in this situation and
+-- that cs_romH is not activated.
 -- -----------------------------------------------------------------------
 
 
