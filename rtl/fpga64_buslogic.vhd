@@ -43,7 +43,7 @@
 -- -----------------------------------------------------------------------
 
 -- -----------------------------------------------------------------------
--- sy2002 3/27/25 and 06/29/25
+-- sy2002 3/27/25 and 06/29/25 and 07/05/25
 --
 -- Fix GitHub issue https://github.com/MJoergen/C64MEGA65/issues/176
 --
@@ -275,6 +275,8 @@ begin
 		dataToCpu <= lastVicData;
 		if cs_CharLoc = '1' then	
 			dataToCpu <= unsigned(charData);
+		elsif cs_UMAXnomapLoc = '1' then  /* main.vhd is ingesting data from the cartridge instead of "RAM" done by sy2002 on 07/05/25 */
+		   dataToCPU <= ramData;
 		elsif cs_romLoc = '1' then	
 			dataToCpu <= unsigned(romData);
 		elsif cs_ramLoc = '1' then
@@ -375,9 +377,9 @@ begin
 					end if;
 				end if;
 			when X"A" | X"B" =>
-				/* if ultimax = '1' then commented out by sy2002 on 3/27/25
-					cs_romHLoc <= '1'; */
-				if exrom = '0' and game = '0' and bankSwitch(1) = '1' and cpuWe = '0' then -- 4/7/23 added and cpuWE = '0' by sy2002 
+				if ultimax = '1' then
+					cs_UMAXnomapLoc <= '1';  /* $A000..$BFFF are unmapped regions in Ultimax mode done by sy2002 on 07/05/25 */
+				elsif exrom = '0' and game = '0' and bankSwitch(1) = '1' and cpuWe = '0' then -- 4/7/23 added and cpuWE = '0' by sy2002 
 					cs_romHLoc <= '1';
 				elsif ultimax = '0' and cpuWe = '0' and bankSwitch(1) = '1' and bankSwitch(0) = '1' then
 					-- Access basic rom
