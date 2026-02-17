@@ -267,7 +267,7 @@ begin
 			  cs_romHLoc, cs_romLLoc, cs_romLoc, cs_CharLoc,
 			  cs_ramLoc, cs_vicLoc, cs_sidLoc, cs_colorLoc,
 			  cs_cia1Loc, cs_cia2Loc, lastVicData,
-			  cs_ioELoc, cs_ioFLoc,
+			  cs_ioELoc, cs_ioFLoc, cs_UMAXnomapLoc,
 			  io_rom, io_ext, io_data)
 	begin
 		-- If no hardware is addressed the bus is floating.
