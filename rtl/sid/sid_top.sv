@@ -3,7 +3,8 @@ module sid_top
 #(
 	parameter MULTI_FILTERS = 1, 
 	parameter USE_8580_TABLES = 1,
-	parameter DUAL = 1
+	parameter DUAL = 1,
+    localparam N = DUAL ? 2 : 1
 )
 (
 	input         reset,
@@ -36,8 +37,6 @@ module sid_top
 	input  [15:0] ld_data,
 	input         ld_wr
 );
-
-localparam N = DUAL ? 2 : 1;
 
 // Internal Signals
 reg  [15:0] Voice_1_Freq[N];
@@ -85,6 +84,16 @@ wire [17:0] sound[N];
 reg         dac_mode[N];
 reg   [7:0] last_wr[N];
 
+reg  [17:0] F0[N];
+reg  [10:0] Fc;
+reg   [1:0] cfg_i;
+reg         mode_i;
+reg   [7:0] dac_addr;
+reg  [17:0] dac_out[N];
+
+wire [17:0] f0;
+wire [17:0] dac_o;
+
 generate
 	genvar i;
 	
@@ -108,7 +117,9 @@ generate
 			.ps__out(ps__out[i*3+0]),
 			.pst_out(pst_out[i*3+0]),
 			.acc_ps(acc_ps[i*3+0]),
-			.acc_t(acc_t[i*3+0])
+			.acc_t(acc_t[i*3+0]),
+			.osc_out(),
+			.env_out()
 		);
 
 		sid_voice v2
@@ -130,7 +141,9 @@ generate
 			.ps__out(ps__out[i*3+1]),
 			.pst_out(pst_out[i*3+1]),
 			.acc_ps(acc_ps[i*3+1]),
-			.acc_t(acc_t[i*3+1])
+			.acc_t(acc_t[i*3+1]),
+			.osc_out(),
+			.env_out()
 		);
 
 		sid_voice v3
@@ -171,7 +184,8 @@ generate
 			.input_valid(ce_1m),
 			.sound(sound[i]),
 			.enable(filter_en[i]),
-			.mode(mode[i])
+			.mode(mode[i]),
+			.mixctl()
 		);
 		
 		// Register Decoding
@@ -234,15 +248,12 @@ generate
 	end
 endgenerate
 
-reg  [17:0] F0[N];
-reg  [10:0] Fc;
-reg   [1:0] cfg_i;
-reg         mode_i;
-reg   [7:0] dac_addr;
-reg  [17:0] dac_out[N];
-
-wire [17:0] f0;
-wire [17:0] dac_o;
+wire  [7:0] f__st_out;
+wire  [7:0] f_p_t_out;
+wire  [7:0] f_ps__out;
+wire  [7:0] f_pst_out;
+reg  [11:0] f_acc_ps;
+reg  [11:0] f_acc_t;
 
 sid_tables #(USE_8580_TABLES,MULTI_FILTERS) sid_tables
 (
@@ -267,13 +278,6 @@ sid_tables #(USE_8580_TABLES,MULTI_FILTERS) sid_tables
 	.dac_addr(dac_addr),
 	.dac_dout(dac_o)
 );
-
-wire  [7:0] f__st_out;
-wire  [7:0] f_p_t_out;
-wire  [7:0] f_ps__out;
-wire  [7:0] f_pst_out;
-reg  [11:0] f_acc_ps;
-reg  [11:0] f_acc_t;
 
 always @(posedge clk) begin
 	reg [3:0] state;

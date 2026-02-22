@@ -48,75 +48,6 @@ module c1541_logic
 	output       act			   // activity LED
 );
 
-assign rom_addr = cpu_a[14:0];
-
-//same decoder as on real HW
-wire [3:0] ls42 = {cpu_a[15],cpu_a[12:10]};
-wire ram_cs     = ls42 == 0 || ls42 == 1;
-wire uc1_cs     = ls42 == 6;
-wire uc3_cs     = ls42 == 7;
-wire rom_cs     = cpu_a[15];
-
-wire  [7:0] cpu_di =
-	!cpu_rw    ? cpu_do :
-	 ram_cs    ? ram_do :
-	 uc1_cs    ? uc1_do :
-	 uc3_cs    ? uc3_do :
-	 extram_cs ? extram_do :
-	 rom_cs    ? rom_data :
-	 8'hFF;
-
-wire [23:0] cpu_a;
-wire  [7:0] cpu_do;
-wire        cpu_rw;
-wire        cpu_irq_n = ~(uc1_irq | uc3_irq);
-wire        cpu_so_n = byte_n | ~soe;
-
-T65 cpu 
-(
-	.mode(2'b00),
-	.res_n(~reset),
-	.enable(ph2_f),
-	.clk(clk),
-	.rdy(1'b1),
-	.abort_n(1'b1),
-	.irq_n(cpu_irq_n),
-	.nmi_n(1'b1),
-	.so_n(cpu_so_n),
-	.r_w_n(cpu_rw),
-	.a(cpu_a),
-	.din(cpu_di),    //changed to "din" due to the issue described in T65.vhd, section "March, 2 2022"
-	.dout(cpu_do)    //changed to "dout", ditto.
-);
-
-wire extram_cs = ext_en && (cpu_a[15:13] == 'b100);
-
-wire [7:0] extram_do;
-iecdrv_mem #(8,13) extram
-(
-	.clock_a(clk),
-	.address_a(cpu_a[12:0]),
-	.data_a(cpu_do),
-	.wren_a(ph2_r & ~cpu_rw & extram_cs),
-
-	.clock_b(clk),
-	.address_b(cpu_a[12:0]),
-	.q_b(extram_do)
-);
-
-wire [7:0] ram_do;
-iecdrv_mem #(8,11) ram
-(
-	.clock_a(clk),
-	.address_a(cpu_a[10:0]),
-	.data_a(cpu_do),
-	.wren_a(ph2_r & ~cpu_rw & ram_cs),
-
-	.clock_b(clk),
-	.address_b(cpu_a[10:0]),
-	.q_b(ram_do)
-);
-
 // UC1 (VIA6522) signals
 wire [7:0] uc1_do;
 wire       uc1_irq;
@@ -131,6 +62,118 @@ wire       uc1_cb1_oe;
 wire       uc1_cb2_o;
 wire       uc1_cb2_oe;
 
+// UC3 (VIA6522) signals
+wire [7:0] uc3_do;
+wire       uc3_irq;
+wire [7:0] uc3_pa_o;
+wire [7:0] uc3_pa_oe;
+wire       uc3_ca2_o;
+wire       uc3_ca2_oe;
+wire [7:0] uc3_pb_o;
+wire [7:0] uc3_pb_oe;
+wire       uc3_cb1_o;
+wire       uc3_cb1_oe;
+wire       uc3_cb2_o;
+wire       uc3_cb2_oe;
+
+wire       soe  = uc3_ca2_o | ~uc3_ca2_oe;
+assign     dout = uc3_pa_o  | ~uc3_pa_oe;
+assign     mode = uc3_cb2_o | ~uc3_cb2_oe;
+
+assign     stp  = uc3_pb_o[1:0] | ~uc3_pb_oe[1:0];
+assign     mtr  = uc3_pb_o[2]   | ~uc3_pb_oe[2];
+assign     act  = uc3_pb_o[3]   | ~uc3_pb_oe[3];
+assign     freq = uc3_pb_o[6:5] | ~uc3_pb_oe[6:5];
+
+
+wire [23:0] cpu_a;
+wire  [7:0] cpu_do;
+wire        cpu_rw;
+wire        cpu_irq_n = ~(uc1_irq | uc3_irq);
+wire        cpu_so_n = byte_n | ~soe;
+
+assign rom_addr = cpu_a[14:0];
+
+//same decoder as on real HW
+wire [3:0] ls42 = {cpu_a[15],cpu_a[12:10]};
+wire ram_cs     = ls42 == 0 || ls42 == 1;
+wire uc1_cs     = ls42 == 6;
+wire uc3_cs     = ls42 == 7;
+wire rom_cs     = cpu_a[15];
+
+wire [7:0] extram_do;
+wire [7:0] ram_do;
+wire extram_cs = ext_en && (cpu_a[15:13] == 'b100);
+
+
+wire  [7:0] cpu_di =
+	!cpu_rw    ? cpu_do :
+	 ram_cs    ? ram_do :
+	 uc1_cs    ? uc1_do :
+	 uc3_cs    ? uc3_do :
+	 extram_cs ? extram_do :
+	 rom_cs    ? rom_data :
+	 8'hFF;
+
+T65 cpu 
+(
+	.mode(2'b00),
+	.bcd_en(1'b1),
+	.res_n(~reset),
+	.enable(ph2_f),
+	.clk(clk),
+	.rdy(1'b1),
+	.abort_n(1'b1),
+	.irq_n(cpu_irq_n),
+	.nmi_n(1'b1),
+	.so_n(cpu_so_n),
+	.r_w_n(cpu_rw),
+	.sync(),
+	.ef(),
+	.mf(),
+	.xf(),
+	.ml_n(),
+	.vp_n(),
+	.vda(),
+	.vpa(),
+	.a(cpu_a),
+	.din(cpu_di),    //changed to "din" due to the issue described in T65.vhd, section "March, 2 2022"
+	.dout(cpu_do),   //changed to "dout", ditto.
+	.regs(),
+	.debug(),
+	.nmi_ack()
+);
+
+iecdrv_mem #(8,13) extram
+(
+	.clock_a(clk),
+	.address_a(cpu_a[12:0]),
+	.data_a(cpu_do),
+	.wren_a(ph2_r & ~cpu_rw & extram_cs),
+	.q_a(),
+
+	.clock_b(clk),
+	.address_b(cpu_a[12:0]),
+	.q_b(extram_do),
+	.wren_b(1'b0),
+	.data_b(8'b0)
+);
+
+iecdrv_mem #(8,11) ram
+(
+	.clock_a(clk),
+	.address_a(cpu_a[10:0]),
+	.data_a(cpu_do),
+	.wren_a(ph2_r & ~cpu_rw & ram_cs),
+	.q_a(),
+
+	.clock_b(clk),
+	.address_b(cpu_a[10:0]),
+	.q_b(ram_do),
+	.wren_b(1'b0),
+	.data_b(8'b0)
+);
+
 assign     iec_data_out = ~(uc1_pb_o[1] | ~uc1_pb_oe[1]) & ~((uc1_pb_o[4] | ~uc1_pb_oe[4]) ^ ~iec_atn_in);
 assign     iec_clk_out  = ~(uc1_pb_o[3] | ~uc1_pb_oe[3]);
 
@@ -143,6 +186,7 @@ iecdrv_via6522 uc1
 	.rising(ph2_r),
 	.falling(ph2_f),
 	.reset(reset),
+	.phi2_ref(),
 
 	.addr(cpu_a[3:0]),
 	.wen(~cpu_rw & uc1_cs),
@@ -176,29 +220,6 @@ iecdrv_via6522 uc1
 );
 
 
-// UC3 (VIA6522) signals
-wire [7:0] uc3_do;
-wire       uc3_irq;
-wire [7:0] uc3_pa_o;
-wire [7:0] uc3_pa_oe;
-wire       uc3_ca2_o;
-wire       uc3_ca2_oe;
-wire [7:0] uc3_pb_o;
-wire [7:0] uc3_pb_oe;
-wire       uc3_cb1_o;
-wire       uc3_cb1_oe;
-wire       uc3_cb2_o;
-wire       uc3_cb2_oe;
-
-wire       soe  = uc3_ca2_o | ~uc3_ca2_oe;
-assign     dout = uc3_pa_o  | ~uc3_pa_oe;
-assign     mode = uc3_cb2_o | ~uc3_cb2_oe;
-
-assign     stp  = uc3_pb_o[1:0] | ~uc3_pb_oe[1:0];
-assign     mtr  = uc3_pb_o[2]   | ~uc3_pb_oe[2];
-assign     act  = uc3_pb_o[3]   | ~uc3_pb_oe[3];
-assign     freq = uc3_pb_o[6:5] | ~uc3_pb_oe[6:5];
-
 
 iecdrv_via6522 uc3
 (
@@ -206,6 +227,7 @@ iecdrv_via6522 uc3
 	.rising(ph2_r),
 	.falling(ph2_f),
 	.reset(reset),
+	.phi2_ref(),
 
 	.addr(cpu_a[3:0]),
 	.wen(~cpu_rw & uc3_cs),

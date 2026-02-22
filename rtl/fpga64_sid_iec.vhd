@@ -103,6 +103,7 @@ port(
 	irq_n       : in  std_logic;
 	nmi_n       : in  std_logic;
 	nmi_ack     : out std_logic;
+	ba          : out std_logic;
 	romL        : out std_logic;
 	romH        : out std_logic;
 	UMAXromH    : out std_logic;
@@ -200,7 +201,7 @@ type sysCycleDef is (
 signal sysCycle     : sysCycleDef := sysCycleDef'low;
 signal preCycle     : sysCycleDef := sysCycleDef'low;
 signal sysEnable    : std_logic;
-signal rfsh_cycle   : unsigned(1 downto 0);
+signal rfsh_cycle   : unsigned(1 downto 0) := "00";
 
 signal dma_active   : std_logic;
 
@@ -305,6 +306,8 @@ component sid_top
 		pot_y_l       : in  std_logic_vector(7 downto 0) := (others => '0');
 		pot_x_r       : in  std_logic_vector(7 downto 0) := (others => '0');
 		pot_y_r       : in  std_logic_vector(7 downto 0) := (others => '0');
+	  ext_in_l      : in  std_logic_vector(13 downto 0) := (others => '0');
+	  ext_in_r      : in  std_logic_vector(13 downto 0) := (others => '0');
 
 		audio_l       : out std_logic_vector(17 downto 0);
 		audio_r       : out std_logic_vector(17 downto 0);
@@ -354,6 +357,7 @@ begin
 -- -----------------------------------------------------------------------
 -- Local signal to outside world
 -- -----------------------------------------------------------------------
+	ba <= baLoc;
 
 io_cycle <= '1' when
 	(sysCycle >= CYCLE_EXT0 and sysCycle <= CYCLE_EXT3) or
@@ -370,12 +374,13 @@ pause_out <= not sysEnable;
 process(clk32)
 begin
 	if rising_edge(clk32) then
-		preCycle <= sysCycleDef'succ(preCycle);
 		if preCycle = sysCycleDef'high then
 			preCycle <= sysCycleDef'low;
 			if sysEnable = '1' then
 				rfsh_cycle <= rfsh_cycle + 1;
 			end if;
+    else
+		  preCycle <= sysCycleDef'succ(preCycle);
 		end if;
 		
 		refresh <= '0';
@@ -881,6 +886,7 @@ begin
 					when "01" => turbo_m <= "110";
 					when "10" => turbo_m <= "111";
 					when "11" => turbo_m <= "111"; -- unused
+					when others => turbo_m <= "111"; -- unused
 				end case;
 			end if;
 		end if;

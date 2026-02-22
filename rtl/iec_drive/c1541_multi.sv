@@ -14,7 +14,10 @@
 //-------------------------------------------------------------------------------
 
 
-module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
+module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2,
+    localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES,
+    localparam N   = NDR - 1
+)
 (
 	//clk ports
 	input         clk,
@@ -65,9 +68,6 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input         rom_std_i
 );
 
-localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
-localparam N   = NDR - 1;
-
 wire iec_atn, iec_data, iec_clk;
 iecdrv_sync atn_sync(clk, iec_atn_i,  iec_atn);
 iecdrv_sync dat_sync(clk, iec_data_i, iec_data);
@@ -77,6 +77,11 @@ wire [N:0] reset_drv;
 iecdrv_sync #(NDR) rst_sync(clk, reset, reset_drv);
 
 wire stdrom = (DUALROM || PARPORT) ? rom_std_i : 1'b1;
+
+wire [7:0] rom_do;
+wire [7:0] qnice_rom2_do;
+wire [7:0] romstd_do;
+wire [7:0] qnice_rom1_do;
 
 assign rom_data_o = (DUALROM || PARPORT) ? qnice_rom2_do : qnice_rom1_do;
 
@@ -132,8 +137,10 @@ xpm_cdc_array_single #(
    .dest_out({empty8k_main, rom16k_main, rom32k_main, rom_sz_main})
 );
 
-wire [7:0] rom_do;
-wire [7:0] qnice_rom2_do;
+reg  [14:0] mem_a;
+wire [14:0] drv_addr[NDR];
+reg   [7:0] drv_data[4];
+
 generate
 	if(PARPORT) begin
 		iecdrv_mem #(
@@ -167,7 +174,9 @@ generate
       
          .clock_b(clk),
          .address_b(mem_a[13:0]),
-         .q_b(rom_do)
+         .q_b(rom_do),
+         .wren_b(1'b0),
+         .data_b(8'b0)
       );         
 	end
 	else begin
@@ -175,8 +184,6 @@ generate
 	end
 endgenerate
 
-wire [7:0] romstd_do;
-wire [7:0] qnice_rom1_do;
 iecdrv_mem_rom #(
    .DATAWIDTH(8),
    .ADDRWIDTH(14),
@@ -191,12 +198,11 @@ iecdrv_mem_rom #(
 
 	.clock_b(clk),
 	.address_b(mem_a[13:0]),
-	.q_b(romstd_do)
+	.q_b(romstd_do),
+	.wren_b(1'b0),
+	.data_b(8'b0)
 );
 
-reg  [14:0] mem_a;
-wire [14:0] drv_addr[NDR];
-reg   [7:0] drv_data[4];
 always @(posedge clk) begin
 	reg [2:0] state;
 	reg [14:0] mem_d;
@@ -247,7 +253,7 @@ generate
 			.img_readonly(img_readonly),
 			.img_size(img_size),
 
-			.drive_num(i),
+			.drive_num(i[1:0]),
 			.led(led_drv[i]),
 
 			.iec_atn_i(iec_atn),

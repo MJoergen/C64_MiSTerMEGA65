@@ -131,6 +131,22 @@ always @(posedge clk) begin
   if (phi2_p) pa_out <= pra | ~ddra;
 end
 
+reg timerBff;
+reg timerAff;
+
+// Timer A
+reg countA0, countA1, countA2, countA3, loadA1, oneShotA0;
+wire timerAin = cra[5] ? countA1 : 1'b1;
+wire [15:0] newTimerAVal = countA3 ? (timer_a - 1'b1) : timer_a;
+wire timerAoverflow = !newTimerAVal & countA2;
+
+// Timer B
+reg countB0, countB1, countB2, countB3, loadB1, oneShotB0;
+wire timerBin = crb[6] ? timerAoverflow & (~crb[5] | cnt_in) : (~crb[5] | countB1);
+wire [15:0] newTimerBVal = countB3 ? (timer_b - 1'b1) : timer_b;
+wire timerBoverflow = !newTimerBVal & countB2;
+
+
 // Port B Output
 always @(posedge clk) begin
   if (!res_n) begin
@@ -181,13 +197,6 @@ always @(posedge clk) begin
 	 pcr  <= 1'b1;
   end
 end
-
-// Timer A
-reg countA0, countA1, countA2, countA3, loadA1, oneShotA0;
-reg timerAff;
-wire timerAin = cra[5] ? countA1 : 1'b1;
-wire [15:0] newTimerAVal = countA3 ? (timer_a - 1'b1) : timer_a;
-wire timerAoverflow = !newTimerAVal & countA2;
 
 always @(posedge clk) begin
 
@@ -251,13 +260,6 @@ always @(posedge clk) begin
       endcase;
   end
 end
-
-// Timer B
-reg countB0, countB1, countB2, countB3, loadB1, oneShotB0;
-reg timerBff;
-wire timerBin = crb[6] ? timerAoverflow & (~crb[5] | cnt_in) : (~crb[5] | countB1);
-wire [15:0] newTimerBVal = countB3 ? (timer_b - 1'b1) : timer_b;
-wire timerBoverflow = !newTimerBVal & countB2;
 
 always @(posedge clk) begin
 

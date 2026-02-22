@@ -40,6 +40,22 @@ module c1541_gcr
 	input             sd_buff_wr
 );
 
+reg [12:0] buff_addr;
+wire [7:0] buff_do;
+reg  [7:0] buff_di;
+
+reg  [4:0] sector;
+reg        sync_in_n;
+reg        byte_in;
+reg  [8:0] byte_cnt;
+reg        nibble;
+reg        state;
+reg  [7:0] data_cks; 
+reg  [7:0] gcr_byte_out;
+reg  [4:0] gcr_nibble_out;
+reg  [7:0] hdr_cks;
+reg [7:0] id1=0, id2=0;
+
 assign sync_n = ~mtr | busy | sync_in_n;
 
 wire [4:0] sector_max=	(track < 18) ? 5'd20 :
@@ -63,7 +79,6 @@ wire [7:0] data_body=	(byte_cnt == 0)   ? 8'h07 :
 														  buff_do;
 
 wire [7:0] data = state ? data_body : data_header;
-wire [4:0] gcr_nibble = gcr_lut[nibble ? data[3:0] : data[7:4]];
 
 wire [4:0] gcr_lut[16] = '{
 	5'b01010, 5'b11010, 5'b01001, 5'b11001,
@@ -71,6 +86,8 @@ wire [4:0] gcr_lut[16] = '{
 	5'b10010, 5'b10011, 5'b01011, 5'b11011,
 	5'b10110, 5'b10111, 5'b01111, 5'b10101
 };
+
+wire [4:0] gcr_nibble = gcr_lut[nibble ? data[3:0] : data[7:4]];
 
 reg [3:0] nibble_out;
 always_comb begin
@@ -122,7 +139,6 @@ always @(posedge clk) begin
 	end
 end
 
-reg [7:0] id1=0, id2=0;
 always @(posedge sd_clk) begin
 	if(sd_lba == 357 && sd_buff_wr) begin
 		if(sd_buff_addr == 'hA2) id1 <= sd_buff_dout;
@@ -154,31 +170,18 @@ dualport_2clk_ram #(
 ) buffer (
 	.clock_a(sd_clk),
 	.address_a(sd_buff_addr),
+	.do_latch_addr_a(1'b0),
 	.data_a(sd_buff_dout),
 	.wren_a(sd_buff_wr),
 	.q_a(sd_buff_din),
 
 	.clock_b(clk),
 	.address_b(buff_addr),
+	.do_latch_addr_b(1'b0),
 	.data_b(buff_di),
 	.wren_b(we),
 	.q_b(buff_do)   
 );
-
-reg [12:0] buff_addr;
-wire [7:0] buff_do;
-reg  [7:0] buff_di;
-
-reg  [4:0] sector;
-reg        sync_in_n;
-reg        byte_in;
-reg  [8:0] byte_cnt;
-reg        nibble;
-reg        state;
-reg  [7:0] data_cks; 
-reg  [7:0] gcr_byte_out;
-reg  [4:0] gcr_nibble_out;
-reg  [7:0] hdr_cks;
 
 always @(posedge clk) begin
 	reg       mode_r2;

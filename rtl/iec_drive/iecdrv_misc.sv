@@ -104,6 +104,13 @@ module iecdrv_mem_rom #(parameter DATAWIDTH, ADDRWIDTH, INITFILE=" ", FALLING_A=
 	output reg [DATAWIDTH-1:0] q_b
 );
 
+// delay signals (MiSTer's original implementation does that so do we)
+reg                 wren_a_d;
+reg [ADDRWIDTH-1:0] address_a_d;
+
+reg                 wren_b_d;
+reg [ADDRWIDTH-1:0] address_b_d;
+
 dualport_2clk_ram #(
    .ADDR_WIDTH(ADDRWIDTH),
    .DATA_WIDTH(DATAWIDTH),
@@ -115,20 +122,18 @@ dualport_2clk_ram #(
 ) ram (
    .clock_a(clock_a),
    .address_a(address_a_d),
+   .do_latch_addr_a(1'b0),
    .data_a(data_a),
    .wren_a(wren_a_d),
    .q_a(q_a),
 
    .clock_b(clock_b),
    .address_b(address_b_d),
+   .do_latch_addr_b(1'b0),
    .data_b(data_b),
    .wren_b(wren_b_d),
    .q_b(q_b) 
 );
-
-// delay signals (MiSTer's original implementation does that so do we)
-reg                 wren_a_d;
-reg [ADDRWIDTH-1:0] address_a_d;
 
 if (FALLING_A == 1'b0) begin
    always @(posedge clock_a) begin
@@ -139,9 +144,6 @@ end else begin // QNICE expects the data to flow instantly on the falling edge, 
    assign wren_a_d    = wren_a;
    assign address_a_d = address_a;
 end
-
-reg                 wren_b_d;
-reg [ADDRWIDTH-1:0] address_b_d;
 
 if (FALLING_B == 1'b0) begin
    always @(posedge clock_b) begin
