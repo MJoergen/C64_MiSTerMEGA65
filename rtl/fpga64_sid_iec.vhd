@@ -103,6 +103,7 @@ port(
 	irq_n       : in  std_logic;
 	nmi_n       : in  std_logic;
 	nmi_ack     : out std_logic;
+	ba          : out std_logic; -- Added 260224 by MFJ
 	romL        : out std_logic;
 	romH        : out std_logic;
 	UMAXromH    : out std_logic;
@@ -354,6 +355,7 @@ begin
 -- -----------------------------------------------------------------------
 -- Local signal to outside world
 -- -----------------------------------------------------------------------
+ba <= baLoc; -- Added 260224 by MFJ
 
 io_cycle <= '1' when
 	(sysCycle >= CYCLE_EXT0 and sysCycle <= CYCLE_EXT3) or
