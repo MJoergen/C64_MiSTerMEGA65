@@ -119,7 +119,7 @@ architecture rtl of video_vicii_656x is
 	signal baSpriteLast : std_logic;
 
 -- Memory refresh cycles
-	signal refreshCounter : unsigned(7 downto 0);
+	signal refreshCounter : unsigned(7 downto 0) := (others => '1');
 
 -- User registers
 	signal MX : MXdef; -- Sprite X
