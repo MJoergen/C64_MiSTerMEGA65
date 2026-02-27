@@ -108,6 +108,8 @@ port(
 	romH        : out std_logic;
 	UMAXromH    : out std_logic;
 	UMAXnomap   : out std_logic; -- 6/29/25 by sy2002
+	rnw_o       : out std_logic; -- Added 260227 by MFJ
+	dout        : out unsigned(7 downto 0); -- Added 260227 by MFJ
 	
 	IOE         : out std_logic;
 	IOF         : out std_logic;
@@ -356,6 +358,8 @@ begin
 -- Local signal to outside world
 -- -----------------------------------------------------------------------
 ba <= baLoc; -- Added 260224 by MFJ
+rnw_o <= not systemWe; -- Added 260227 by MFJ
+dout <= cpuDo when cpuWe = '1' else cpuDi; -- Added 260227 by MFJ
 
 io_cycle <= '1' when
 	(sysCycle >= CYCLE_EXT0 and sysCycle <= CYCLE_EXT3) or
