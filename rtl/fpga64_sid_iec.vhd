@@ -203,7 +203,7 @@ type sysCycleDef is (
 signal sysCycle     : sysCycleDef := sysCycleDef'low;
 signal preCycle     : sysCycleDef := sysCycleDef'low;
 signal sysEnable    : std_logic;
-signal rfsh_cycle   : unsigned(1 downto 0);
+signal rfsh_cycle   : unsigned(1 downto 0) := "00";
 
 signal dma_active   : std_logic;
 
@@ -376,12 +376,13 @@ pause_out <= not sysEnable;
 process(clk32)
 begin
 	if rising_edge(clk32) then
-		preCycle <= sysCycleDef'succ(preCycle);
 		if preCycle = sysCycleDef'high then
 			preCycle <= sysCycleDef'low;
 			if sysEnable = '1' then
 				rfsh_cycle <= rfsh_cycle + 1;
 			end if;
+    else
+		  preCycle <= sysCycleDef'succ(preCycle);
 		end if;
 		
 		refresh <= '0';
@@ -686,31 +687,31 @@ pot_y1 <= (others => '1' ) when cia1_pao(6) = '0' else not pot2;
 pot_x2 <= (others => '1' ) when cia1_pao(7) = '0' else not pot3;
 pot_y2 <= (others => '1' ) when cia1_pao(7) = '0' else not pot4;
 
-sid : sid_top
-port map (
-	reset => reset,
-	clk => clk32,
-	ce_1m => enableSid,
-	we => pulseWr_io,
-	cs => sid_sel_r & sid_sel_l,
-	addr => cpuAddr(4 downto 0),
-	data_in => cpuDo,
-	data_out => sid_do,
-	pot_x_l => pot_x1 and pot_x2,
-	pot_y_l => pot_y1 and pot_y2,
-
-	audio_l => audio_l,
-	audio_r => audio_r,
-
-	filter_en => sid_filter,
-	mode    => sid_ver,
-	cfg     => sid_cfg,
-
-	ld_clk  => sid_ld_clk,
-	ld_addr => sid_ld_addr,
-	ld_data => sid_ld_data,
-	ld_wr   => sid_ld_wr
-);
+--sid : sid_top
+--port map (
+--	reset => reset,
+--	clk => clk32,
+--	ce_1m => enableSid,
+--	we => pulseWr_io,
+--	cs => sid_sel_r & sid_sel_l,
+--	addr => cpuAddr(4 downto 0),
+--	data_in => cpuDo,
+--	data_out => sid_do,
+--	pot_x_l => pot_x1 and pot_x2,
+--	pot_y_l => pot_y1 and pot_y2,
+--
+--	audio_l => audio_l,
+--	audio_r => audio_r,
+--
+--	filter_en => sid_filter,
+--	mode    => sid_ver,
+--	cfg     => sid_cfg,
+--
+--	ld_clk  => sid_ld_clk,
+--	ld_addr => sid_ld_addr,
+--	ld_data => sid_ld_data,
+--	ld_wr   => sid_ld_wr
+--);
 
 -- -----------------------------------------------------------------------
 -- CIAs
@@ -886,7 +887,7 @@ begin
 					when "00" => turbo_m <= "010";
 					when "01" => turbo_m <= "110";
 					when "10" => turbo_m <= "111";
-					when "11" => turbo_m <= "111"; -- unused
+					when others => turbo_m <= "111"; -- unused
 				end case;
 			end if;
 		end if;
