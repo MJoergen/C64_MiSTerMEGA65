@@ -19,19 +19,19 @@ port(
 	vsync : in std_logic;
 	ntsc  : in std_logic;
 	wide  : in std_logic;
-	hsync_out : out std_logic;
-	vsync_out : out std_logic;
-	hblank : out std_logic;
-	vblank : out std_logic
+	hsync_out : out std_logic := '0';
+	vsync_out : out std_logic := '0';
+	hblank : out std_logic := '0';
+	vblank : out std_logic := '0'
 );
 end;
 
 architecture struct of video_sync is
 
-	signal clk_cnt : std_logic_vector(1 downto 0);
-	signal vsync_r : std_logic;
-	signal hsync_r : std_logic;
-	signal hsync_r0 : std_logic;
+	signal clk_cnt : std_logic_vector(1 downto 0) := "11";
+	signal vsync_r : std_logic := '0';
+	signal hsync_r : std_logic := '0';
+	signal hsync_r0 : std_logic := '0';
 
 begin
 

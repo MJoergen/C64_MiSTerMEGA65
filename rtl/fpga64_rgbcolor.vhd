@@ -50,7 +50,7 @@ begin
 		when X"C" => r <= X"7b"; g <= X"7b"; b <= X"7b";
 		when X"D" => r <= X"a9"; g <= X"ff"; b <= X"9f";
 		when X"E" => r <= X"70"; g <= X"6d"; b <= X"eb";
-		when X"F" => r <= X"b2"; g <= X"b2"; b <= X"b2";
+		when others => r <= X"b2"; g <= X"b2"; b <= X"b2";
 		end case;
 	end process;
 end Behavioral;

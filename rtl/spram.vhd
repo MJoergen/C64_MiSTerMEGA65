@@ -27,7 +27,7 @@ architecture rtl of spram is
 	subtype word_t is unsigned((DATA_WIDTH-1) downto 0);
 	type memory_t is array(2**ADDR_WIDTH-1 downto 0) of word_t;
 
-	shared variable ram : memory_t;
+	shared variable ram : memory_t := (others => (others => '0'));
 
 begin
 

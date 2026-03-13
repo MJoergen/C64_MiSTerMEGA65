@@ -33,62 +33,6 @@ module sid_tables
 wire [7:0] triangle = {8{acc_t[11]}} ^ acc_t[10:3];
 wire [7:0] sawtooth = acc_ps[11:4];
 
-always @(posedge clock) begin
-	if(mode) begin
-		if(USE_8580_TABLES) begin
-			_st_out <= wave8580__st[acc_ps];
-			p_t_out <= wave8580_p_t[acc_t];
-			ps__out <= wave8580_ps_[acc_ps];
-			pst_out <= wave8580_pst[acc_ps];
-		end
-		else begin
-			_st_out <= triangle & sawtooth;
-			p_t_out <= triangle;
-			ps__out <= sawtooth;
-			pst_out <= triangle & sawtooth;
-		end
-	end
-	else begin
-		casex(acc_ps[10:0])
-			'bXXX10111111: _st_out <= 'h01;
-			'bXX100111111: _st_out <= 'h01;
-			'bXXX0111111X: _st_out <= 'h03;
-			'bXX0111111XX: _st_out <= 'h07;
-			'b001111110XX: _st_out <= 'h0E;
-			'b001111111XX: _st_out <= 'h0F;
-			'b01111110XXX: _st_out <= 'h1C;
-			'b011111110XX: _st_out <= 'h1E;
-			'b0111111110X: _st_out <= 'h1F;
-			'b0111111111X: _st_out <= 'h3F;
-			'b101111110XX: _st_out <= 'h0E;
-			'b1011111110X: _st_out <= 'h0F;
-			'b10111111110: _st_out <= 'h0F;
-			'b10111111111: _st_out <= 'h1F;
-			'b1111110XXXX: _st_out <= 'h38;
-			'b11111110XXX: _st_out <= 'h3C;
-			'b1111111100X: _st_out <= 'h3E;
-			'b1111111101X: _st_out <= 'h3F;
-			'b111111111XX: _st_out <= 'h7F;
-					default: _st_out <= 'h00;
-		endcase
-
-		case(acc_ps[10:0])
-			'b01111111111: pst_out <= 'h3F;
-			'b11111101111: pst_out <= 'h20;
-			'b11111110111: pst_out <= 'h30;
-			'b11111111011: pst_out <= 'h78;
-			'b11111111100: pst_out <= 'h78;
-			'b11111111101: pst_out <= 'h7E;
-			'b11111111110: pst_out <= 'h7F;
-			'b11111111111: pst_out <= 'h7F;
-					default: pst_out <= 'h00;
-		endcase
-
-		p_t_out <= wave6581_p_t[acc_t[11] ? ~acc_t[10:0] : acc_t[10:0]];
-		ps__out <= wave6581_ps_[acc_ps[10:0]];
-	end
-end
-
 wire [7:0] wave6581_p_t[0:2047] = 
 '{
 	8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h00,
@@ -2685,8 +2629,6 @@ wire [7:0] wave8580_pst[0:4095] =
 reg [8:0] dac_addr_r;
 always @(posedge clock) dac_addr_r <= {mode,dac_addr};
 
-assign dac_dout = data[dac_addr_r];
-
 wire [17:0] data[512] =
 '{
 		 11,  10280,  20474,  30280,  40329,  49618,  58811,  67580,
@@ -2756,6 +2698,64 @@ wire [17:0] data[512] =
 	209216, 198564, 187919, 177381, 166370, 155971, 145592, 135670	
 };
 
+assign dac_dout = data[dac_addr_r];
+
+
+always @(posedge clock) begin
+	if(mode) begin
+		if(USE_8580_TABLES) begin
+			_st_out <= wave8580__st[acc_ps];
+			p_t_out <= wave8580_p_t[acc_t];
+			ps__out <= wave8580_ps_[acc_ps];
+			pst_out <= wave8580_pst[acc_ps];
+		end
+		else begin
+			_st_out <= triangle & sawtooth;
+			p_t_out <= triangle;
+			ps__out <= sawtooth;
+			pst_out <= triangle & sawtooth;
+		end
+	end
+	else begin
+		casex(acc_ps[10:0])
+			'bXXX10111111: _st_out <= 'h01;
+			'bXX100111111: _st_out <= 'h01;
+			'bXXX0111111X: _st_out <= 'h03;
+			'bXX0111111XX: _st_out <= 'h07;
+			'b001111110XX: _st_out <= 'h0E;
+			'b001111111XX: _st_out <= 'h0F;
+			'b01111110XXX: _st_out <= 'h1C;
+			'b011111110XX: _st_out <= 'h1E;
+			'b0111111110X: _st_out <= 'h1F;
+			'b0111111111X: _st_out <= 'h3F;
+			'b101111110XX: _st_out <= 'h0E;
+			'b1011111110X: _st_out <= 'h0F;
+			'b10111111110: _st_out <= 'h0F;
+			'b10111111111: _st_out <= 'h1F;
+			'b1111110XXXX: _st_out <= 'h38;
+			'b11111110XXX: _st_out <= 'h3C;
+			'b1111111100X: _st_out <= 'h3E;
+			'b1111111101X: _st_out <= 'h3F;
+			'b111111111XX: _st_out <= 'h7F;
+					default: _st_out <= 'h00;
+		endcase
+
+		case(acc_ps[10:0])
+			'b01111111111: pst_out <= 'h3F;
+			'b11111101111: pst_out <= 'h20;
+			'b11111110111: pst_out <= 'h30;
+			'b11111111011: pst_out <= 'h78;
+			'b11111111100: pst_out <= 'h78;
+			'b11111111101: pst_out <= 'h7E;
+			'b11111111110: pst_out <= 'h7F;
+			'b11111111111: pst_out <= 'h7F;
+					default: pst_out <= 'h00;
+		endcase
+
+		p_t_out <= wave6581_p_t[acc_t[11] ? ~acc_t[10:0] : acc_t[10:0]];
+		ps__out <= wave6581_ps_[acc_ps[10:0]];
+	end
+end
 
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -2763,16 +2763,6 @@ wire [17:0] data[512] =
 wire [35:0] mul = 18'd82355 * (Fc + 1'b1);
 
 reg [15:0] f0;
-generate
-	if(MULTI_FILTERS) begin
-		always @(posedge ld_clk) if(ld_wr) f6581_curve[1024+ld_addr] <= ld_data;
-		always @(posedge clock) f0 <= f6581_curve[{cfg, Fc[10:1]}];
-	end
-	else begin
-		always @(posedge ld_clk) if(ld_wr) f6581_curve[ld_addr[9:0]] <= ld_data;
-		always @(posedge clock) f0 <= f6581_curve[Fc[10:1]];
-	end
-endgenerate
 
 always @(posedge clock) F0 <= mode ? {mul[35], mul[28:12]} : {1'b0, f0, 1'b0};
 
@@ -3304,5 +3294,16 @@ reg  [15:0] f6581_curve[4*1024] =
     29553,  29560,  29567,  29572,  29578,  29585,  29590,  29596,
     29603,  29608,  29614,  29619,  29626,  29632,  29637,  29644
 };
+
+generate
+	if(MULTI_FILTERS) begin
+		always @(posedge ld_clk) if(ld_wr) f6581_curve[1024+ld_addr] <= ld_data;
+		always @(posedge clock) f0 <= f6581_curve[{cfg, Fc[10:1]}];
+	end
+	else begin
+		always @(posedge ld_clk) if(ld_wr) f6581_curve[ld_addr[9:0]] <= ld_data;
+		always @(posedge clock) f0 <= f6581_curve[Fc[10:1]];
+	end
+endgenerate
 
 endmodule

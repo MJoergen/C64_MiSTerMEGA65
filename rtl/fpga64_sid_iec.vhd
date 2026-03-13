@@ -201,7 +201,7 @@ type sysCycleDef is (
 signal sysCycle     : sysCycleDef := sysCycleDef'low;
 signal preCycle     : sysCycleDef := sysCycleDef'low;
 signal sysEnable    : std_logic;
-signal rfsh_cycle   : unsigned(1 downto 0);
+signal rfsh_cycle   : unsigned(1 downto 0) := "00";
 
 signal dma_active   : std_logic;
 
@@ -304,8 +304,10 @@ component sid_top
 
 		pot_x_l       : in  std_logic_vector(7 downto 0) := (others => '0');
 		pot_y_l       : in  std_logic_vector(7 downto 0) := (others => '0');
+		ext_in_l      : in  std_logic_vector(13 downto 0) := (others => '0');
 		pot_x_r       : in  std_logic_vector(7 downto 0) := (others => '0');
 		pot_y_r       : in  std_logic_vector(7 downto 0) := (others => '0');
+		ext_in_r      : in  std_logic_vector(13 downto 0) := (others => '0');
 
 		audio_l       : out std_logic_vector(17 downto 0);
 		audio_r       : out std_logic_vector(17 downto 0);
@@ -372,12 +374,13 @@ pause_out <= not sysEnable;
 process(clk32)
 begin
 	if rising_edge(clk32) then
-		preCycle <= sysCycleDef'succ(preCycle);
 		if preCycle = sysCycleDef'high then
 			preCycle <= sysCycleDef'low;
 			if sysEnable = '1' then
 				rfsh_cycle <= rfsh_cycle + 1;
 			end if;
+    else
+		  preCycle <= sysCycleDef'succ(preCycle);
 		end if;
 		
 		refresh <= '0';
@@ -882,7 +885,7 @@ begin
 					when "00" => turbo_m <= "010";
 					when "01" => turbo_m <= "110";
 					when "10" => turbo_m <= "111";
-					when "11" => turbo_m <= "111"; -- unused
+					when others => turbo_m <= "111"; -- unused
 				end case;
 			end if;
 		end if;

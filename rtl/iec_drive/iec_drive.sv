@@ -5,7 +5,9 @@
 //
 //-------------------------------------------------------------------------------
  
-module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
+module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2,
+localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES,
+localparam N   = NDR - 1)
 (
 	//clk ports
 	input         clk,
@@ -57,11 +59,23 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input         rom_std_i
 );
 
-localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
-localparam N   = NDR - 1;
-
 reg [N:0] dtype[2];
 always @(posedge clk_sys) for(int i=0; i<NDR; i=i+1) if(img_mounted[i] && img_size) {dtype[1][i],dtype[0][i]} <= img_type;
+
+wire        c1541_iec_data, c1541_iec_clk, c1541_stb_o;
+wire  [7:0] c1541_par_o;
+wire  [N:0] c1541_led;
+wire  [7:0] c1541_sd_buff_dout[NDR];
+wire [31:0] c1541_sd_lba[NDR];
+wire  [N:0] c1541_sd_rd, c1541_sd_wr;
+wire  [5:0] c1541_sd_blk_cnt[NDR];
+
+wire        c1581_iec_data, c1581_iec_clk, c1581_stb_o;
+wire  [7:0] c1581_par_o;
+wire  [N:0] c1581_led;
+wire  [7:0] c1581_sd_buff_dout[NDR];
+wire [31:0] c1581_sd_lba[NDR];
+wire  [N:0] c1581_sd_rd, c1581_sd_wr;
 
 assign led          = /*c1581_led       |*/ c1541_led;
 assign iec_data_o   = /*c1581_iec_data  &*/ c1541_iec_data;
@@ -76,14 +90,6 @@ always_comb for(int i=0; i<NDR; i=i+1) begin
 	sd_wr[i]       = (dtype[1][i] ? c1581_sd_wr[i]        : c1541_sd_wr[i]        );
 	sd_blk_cnt[i]  = (dtype[1][i] ? 6'd1                  : c1541_sd_blk_cnt[i]   );
 end
-
-wire        c1541_iec_data, c1541_iec_clk, c1541_stb_o;
-wire  [7:0] c1541_par_o;
-wire  [N:0] c1541_led;
-wire  [7:0] c1541_sd_buff_dout[NDR];
-wire [31:0] c1541_sd_lba[NDR];
-wire  [N:0] c1541_sd_rd, c1541_sd_wr;
-wire  [5:0] c1541_sd_blk_cnt[NDR];
 
 c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 (
@@ -131,12 +137,6 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 );
 
 
-wire        c1581_iec_data, c1581_iec_clk, c1581_stb_o;
-wire  [7:0] c1581_par_o;
-wire  [N:0] c1581_led;
-wire  [7:0] c1581_sd_buff_dout[NDR];
-wire [31:0] c1581_sd_lba[NDR];
-wire  [N:0] c1581_sd_rd, c1581_sd_wr;
 /* //When commenting-in this here, don't forget to comment-in above c1581_iec_data, c1581_iec_clk, c1581_led 
 c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 (

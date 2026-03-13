@@ -47,20 +47,21 @@ wire [7:0] hrh  = (hr >= 12) ? (hr - 8'd12) : hr;
 wire [5:0] hr12 = (!hrh) ? 6'h12 : (hrh == 11) ? 6'h11 : (hrh == 10) ? 6'h10 : hrh[5:0];
 wire       pm   = (hr >= 12);
 
+reg  [3:0] cnt = 0;
+reg [10:0] bcnt = 0;
+reg        flg = 0;
+reg [31:0] seccnt = 1;
+
 always @(posedge clk) begin
 	reg  [1:0] sda_sr, scl_sr;
 	reg        old_sda, old_scl;
 	reg        sda, scl;
 	reg  [7:0] tmp;
-	reg  [3:0] cnt = 0;
-	reg [10:0] bcnt = 0;
 	reg        ack;
 	reg        i2c_rw;
 	reg  [7:0] ptr;
 	reg  [7:0] data[256];
 	reg  [7:0] tm[17];
-	reg        flg = 0;
-	reg [31:0] seccnt = 1;
 	reg  [7:0] scl_d;
 	reg  [7:0] sda_d;
 	reg  [7:0] bt;

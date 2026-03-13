@@ -97,6 +97,9 @@ always @(posedge clk) begin : label1
 		ram_cs     <= 0;
 		cpu_din    <= 'hFF;
 		state      <= STATE_IDLE;
+		dma_addr   <= 0;
+		dma_dout   <= 0;
+		ram_dout   <= 0;
 	end
 	else begin
 		if(~dma_req & ~old_cs & cpu_cs) begin

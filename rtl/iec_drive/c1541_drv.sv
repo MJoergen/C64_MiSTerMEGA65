@@ -66,14 +66,22 @@ module c1541_drv
 	input         sd_buff_wr
 );
 
+wire       mode; // read/write
+wire [1:0] stp;
+wire       mtr;
+wire       act;
+wire [1:0] freq;
+
+wire       sd_busy;
+
 assign led = act | sd_busy;
 
 reg        readonly = 0;
 reg        disk_present = 0;
 reg [24:0] ch_timeout;
+reg        present = 0;
 always @(posedge clk) begin
 	reg old_mounted;
-	reg present = 0;
 
 	if(ce && ch_timeout > 0) ch_timeout <= ch_timeout - 1'd1;
 	if(!ch_timeout) disk_present <= present;
@@ -87,11 +95,17 @@ always @(posedge clk) begin
 	end
 end
 
-wire       mode; // read/write
-wire [1:0] stp;
-wire       mtr;
-wire       act;
-wire [1:0] freq;
+wire [7:0] dgcr_do, dgcr_sd_buff_dout;
+wire       dgcr_sync_n, dgcr_byte_n, dgcr_we;
+
+wire [7:0]  gcr_do, gcr_sd_buff_dout;
+wire        gcr_sync_n, gcr_byte_n, gcr_we;
+
+wire  [7:0] gcr_di;
+wire        we = gcr_mode ? dgcr_we : gcr_we;
+assign      sd_buff_din = gcr_mode ? dgcr_sd_buff_dout : gcr_sd_buff_dout;
+
+reg  [6:0] track;
 
 c1541_logic c1541_logic
 (
@@ -134,15 +148,9 @@ c1541_logic c1541_logic
 	.act(act)
 );
 
-wire  [7:0] gcr_di;
-wire        we = gcr_mode ? dgcr_we : gcr_we;
-assign      sd_buff_din = gcr_mode ? dgcr_sd_buff_dout : gcr_sd_buff_dout;
+wire busy;
 
-wire sd_busy;
 iecdrv_sync busy_sync(clk, busy, sd_busy);
-
-wire [7:0]  gcr_do, gcr_sd_buff_dout;
-wire        gcr_sync_n, gcr_byte_n, gcr_we;
 
 c1541_gcr c1541_gcr
 (
@@ -168,9 +176,6 @@ c1541_gcr c1541_gcr
 	.sd_buff_din(gcr_sd_buff_dout),
 	.sd_buff_wr(sd_ack & sd_buff_wr & ~gcr_mode)
 );
-
-wire [7:0] dgcr_do, dgcr_sd_buff_dout;
-wire       dgcr_sync_n, dgcr_byte_n, dgcr_we;
 
 /*
 //when commenting-in again: needs iecdrv_bitmem, which is currently commented-out in iecdrv_misc.sv
@@ -200,7 +205,7 @@ c1541_direct_gcr c1541_direct_gcr
 );
 */
 
-wire busy;
+reg       save_track = 0;
 
 c1541_track c1541_track
 (
@@ -221,8 +226,6 @@ c1541_track c1541_track
 	.busy(busy)
 );
 
-reg [6:0] track;
-reg       save_track = 0;
 always @(posedge clk) begin
 	reg       track_modified;
 	reg [6:0] track_num;

@@ -37,6 +37,9 @@ module c1541_track
 	output reg    busy
 );
 
+reg [31:0] lba;
+reg  [9:0] len;
+
 assign sd_lba     = lba;
 assign sd_blk_cnt = gcr_mode ? 6'h1F : len[5:0];
 
@@ -54,15 +57,13 @@ wire [9:0] start_sectors[41] =
   768
 };
 
-reg [31:0] lba;
-reg  [9:0] len;
+reg  [6:0] cur_track = 0;
+reg        old_change, update = 0;
+reg        saving = 0, initing = 0;
+reg        old_save_track = 0;
 
 always @(posedge clk) begin
-	reg  [6:0] cur_track = 0;
 	reg  [6:0] track_new;
-	reg        old_change, update = 0;
-	reg        saving = 0, initing = 0;
-	reg        old_save_track = 0;
 	reg        old_ack;
 
 	// delay track change after sync, so make sure save_track comes first.

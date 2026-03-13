@@ -57,7 +57,7 @@ entity video_vicii_656x is
 
 		di: in unsigned(7 downto 0);
 		diColor: in unsigned(3 downto 0);
-		do: out unsigned(7 downto 0);
+		do: out unsigned(7 downto 0) := X"FF";
 
 		vicAddr: out unsigned(13 downto 0);
 		irq_n: out std_logic;
@@ -103,23 +103,23 @@ architecture rtl of video_vicii_656x is
 	signal shiftChars : boolean;
 	signal shiftLoadEna : boolean;
 	signal idle: std_logic := '1';
-	signal rasterIrqDone : std_logic; -- Only one interrupt each rasterLine
-	signal rasterEnable: std_logic;
+	signal rasterIrqDone : std_logic := '0'; -- Only one interrupt each rasterLine
+	signal rasterEnable: std_logic := '0';
 
 -- BA signal
 	signal badLine : boolean; -- true if we have a badline condition
 	signal baLoc : std_logic;
-	signal baCnt : unsigned(2 downto 0);
+	signal baCnt : unsigned(2 downto 0) := (others => '0');
 
-	signal baChars : std_logic;
-	signal baSprite04 : std_logic;
-	signal baSprite15 : std_logic;
-	signal baSprite26 : std_logic;
-	signal baSprite37 : std_logic;
-	signal baSpriteLast : std_logic;
+	signal baChars : std_logic := '0';
+	signal baSprite04 : std_logic := '0';
+	signal baSprite15 : std_logic := '0';
+	signal baSprite26 : std_logic := '0';
+	signal baSprite37 : std_logic := '0';
+	signal baSpriteLast : std_logic := '0';
 
 -- Memory refresh cycles
-	signal refreshCounter : unsigned(7 downto 0);
+	signal refreshCounter : unsigned(7 downto 0) := (others => '1');
 
 -- User registers
 	signal MX : MXdef; -- Sprite X
@@ -161,11 +161,11 @@ architecture rtl of video_vicii_656x is
 
 -- borders and blanking
 	signal MainBorder: std_logic;
-	signal TBBorder: std_logic;
+	signal TBBorder: std_logic := '0';
 	signal setTBBorder: boolean;
 	signal hBlack: std_logic;
 	signal vBlanking : std_logic;
-	signal hBlanking : std_logic;
+	signal hBlanking : std_logic := '0';
 	signal xscroll: unsigned(2 downto 0);
 	signal yscroll: unsigned(2 downto 0);
 	signal rasterCmp : unsigned(8 downto 0);
@@ -191,13 +191,13 @@ architecture rtl of video_vicii_656x is
 	signal IRQ: std_logic;
 
 -- Collision detection registers
-	signal collision : unsigned(7 downto 0);
-	signal M2M: unsigned(7 downto 0); -- Sprite to sprite collision
-	signal M2D: unsigned(7 downto 0); -- Sprite to character collision
-	signal M2DDelay: unsigned(7 downto 0); -- Sprite to character collision
-	signal M2Mhit : std_logic;
-	signal M2Dhit : std_logic;
-	signal M2MClr : std_logic; -- collision register clear flag
+	signal collision : unsigned(7 downto 0) := X"00";
+	signal M2M: unsigned(7 downto 0) := X"00"; -- Sprite to sprite collision
+	signal M2D: unsigned(7 downto 0) := X"00"; -- Sprite to character collision
+	signal M2DDelay: unsigned(7 downto 0) := X"00"; -- Sprite to character collision
+	signal M2Mhit : std_logic := '0';
+	signal M2Dhit : std_logic := '0';
+	signal M2MClr : std_logic := '0'; -- collision register clear flag
 
 -- Raster counters
 	signal rasterX : unsigned(9 downto 0) := (others => '0');
@@ -208,9 +208,9 @@ architecture rtl of video_vicii_656x is
 	signal rasterXDelay : unsigned(9 downto 0);
 
 -- Light pen
-	signal lightPenHit: std_logic;
-	signal lpX : unsigned(7 downto 0);
-	signal lpY : unsigned(7 downto 0);
+	signal lightPenHit: std_logic := '0';
+	signal lpX : unsigned(7 downto 0) := (others => '1');
+	signal lpY : unsigned(7 downto 0) := (others => '1');
 
 -- IRQ Resets
 	signal resetLightPenIrq: std_logic;
@@ -219,8 +219,8 @@ architecture rtl of video_vicii_656x is
 	signal resetRasterIrq : std_logic;
 
 -- Character generation
-	signal charStore: charStoreDef;
-	signal nextChar : unsigned(11 downto 0);
+	signal charStore: charStoreDef := (others => (others => '0'));
+	signal nextChar : unsigned(11 downto 0) := (others => '0');
 	-- Char/Pixels pair waiting to be shifted
 	signal waitingChar : unsigned(11 downto 0);
 	signal waitingChar_r : unsigned(11 downto 0);
@@ -235,9 +235,9 @@ architecture rtl of video_vicii_656x is
 	signal shifting_ff : std_logic; -- Multicolor shift-regiter status bit.
 
 -- Sprite work registers
-	signal MPtr : unsigned(7 downto 0); -- sprite base pointer
+	signal MPtr : unsigned(7 downto 0) := X"FF"; -- sprite base pointer
 	signal MPixels : MPixelsDef; -- Sprite 24 bit shift register
-	signal MPixelStore : unsigned(15 downto 0); -- Store fetched sprite bytes until ready to load into the shift register
+	signal MPixelStore : unsigned(15 downto 0) := X"FFFF"; -- Store fetched sprite bytes until ready to load into the shift register
 	signal MActive : MFlags; -- Sprite is active
 	signal MActive_next : MFlags; -- Sprite is active combinatorial
 	signal MDMA : MFlags; -- Sprite DMA is enabled
@@ -251,8 +251,8 @@ architecture rtl of video_vicii_656x is
 	signal MYE_ff_next : unsigned(7 downto 0); -- Sprite Y expansion flipflop combinatorial
 	signal MC_ff : unsigned(7 downto 0); -- controls sprite shift-register in multicolor
 	signal MShift_stop : MFlags; -- Stop sprite shifting flag
-	signal MCurrentPixel_r : MCurrentPixelDef;
-	signal MCurrentPixel : MCurrentPixelDef;
+	signal MCurrentPixel_r : MCurrentPixelDef := (others => (others => '0'));
+	signal MCurrentPixel : MCurrentPixelDef := (others => (others => '0'));
 
 -- Current colors and pixels
 	signal pixelBgFlag: std_logic; -- For collision detection
