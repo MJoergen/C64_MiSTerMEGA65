@@ -29,11 +29,13 @@ entity cpu_6510 is
 		nmi_ack : out std_logic;
 		irq_n   : in  std_logic;
 		rdy     : in  std_logic;
+		sync    : out std_logic;
 
 		di      : in  unsigned(7 downto 0);
 		do      : out unsigned(7 downto 0);
 		addr    : out unsigned(15 downto 0);
 		we      : out std_logic;
+    regs    : out std_logic_vector(63 downto 0);
 
 		diIO    : in  unsigned(7 downto 0);
 		doIO    : out unsigned(7 downto 0)
@@ -57,6 +59,7 @@ begin
 
    cpu: entity work.T65
 	port map(
+    sync    => sync,
 		Mode    => "00",
 		Res_n   => not reset,
 		Enable  => enable,
@@ -70,6 +73,7 @@ begin
 		A       => localA,
 		din     => localDi,   -- changed to "din" due to the issue described in T65.vhd, section "March, 2 2022"
 		dout    => localDo,   -- changed to "dout", ditto.
+    regs    => regs,
 		NMI_ack => nmi_ack
 	);
 

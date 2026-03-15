@@ -50,6 +50,9 @@ library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.std_logic_unsigned.ALL;
 use IEEE.numeric_std.all;
+use std.textio.all;
+use work.fmt.fmt;
+use work.fmt.f;
 
 -- -----------------------------------------------------------------------
 
@@ -289,6 +292,11 @@ signal pot_x1       : std_logic_vector(7 downto 0);
 signal pot_y1       : std_logic_vector(7 downto 0);
 signal pot_x2       : std_logic_vector(7 downto 0);
 signal pot_y2       : std_logic_vector(7 downto 0);
+
+signal vic_debugx  : unsigned(9 downto 0);
+signal vic_debugy  : unsigned(8 downto 0);
+signal cpuSync     : std_logic;
+signal cpuRegs     : std_logic_vector(63 downto 0);
 
 component sid_top
 	port (
@@ -565,6 +573,8 @@ generic map (
 	emulateGraphics => true
 )			
 port map (
+debugx => vic_debugx,
+debugy => vic_debugy,
 	clk => clk32,
 	reset => reset,
 	enaPixel => enablePixel,
@@ -833,11 +843,13 @@ port map (
 	nmi_ack => nmi_ack,
 	irq_n => irq_cia1 and irq_vic and irq_n and irq_ext_n,
 	rdy => baLoc,
+  sync => cpuSync,
 
 	di => cpuDi,
 	addr => cpuAddr_pre,
 	do => cpuDo_pre,
 	we => cpuWe_pre,
+  regs => cpuRegs,
 
 	diIO => cpuIO(7) & cpuIO(6) & cpuIO(5) & cass_sense & cpuIO(3) & "111",
 	doIO => cpuIO
@@ -900,4 +912,45 @@ ext_cycle <= '1' when (sysCycle >= CYCLE_DMA0 and sysCycle <= CYCLE_DMA3) else '
 dma_cycle <= '1' when (sysCycle >= CYCLE_CPU0 and sysCycle <= CYCLE_CPUF) and cpuHasBus = '1' and dma_active = '1' else '0';
 dma_din   <= cpuDi;
 
+debug_proc : process
+  file tf      : text;
+  variable l   : line;
+  variable clk : natural := 0;
+begin
+  file_open(tf, "debug.log", write_mode);
+  wait until reset = '0';
+
+  main_loop : loop
+    wait until rising_edge(clk32);
+
+    if enableCpu then
+
+      if (not dma_active) and cpuSync then
+        if vic_debugx(9 downto 3) >= 50 then
+          write(l, fmt("{} . {}, {}, {} : {}",
+            f(clk, ">8d"),
+            f(to_integer(vic_debugy) - 1, ">3u"),
+            f(to_integer(vic_debugx(9 downto 3)), ">3u"),
+            to_hstring(cpuDi),
+            to_hstring(cpuRegs)
+          ));
+        else
+          write(l, fmt("{} . {}, {}, {} : {}",
+            f(clk, ">8d"),
+            f(to_integer(vic_debugy), ">3u"),
+            f(to_integer(vic_debugx(9 downto 3)), ">3u"),
+            to_hstring(cpuDi),
+            to_hstring(cpuRegs)
+          ));
+        end if;
+        writeline(tf, l);
+      end if;
+      clk := clk + 1;
+    end if;
+  end loop main_loop;
+
+  file_close(tf);
+end process debug_proc;
+
 end architecture;
+
