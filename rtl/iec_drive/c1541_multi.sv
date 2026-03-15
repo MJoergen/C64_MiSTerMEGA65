@@ -84,8 +84,8 @@ assign rom_data_o = (DUALROM || PARPORT) ? qnice_rom2_do : qnice_rom1_do;
 
 reg ph2_r;
 reg ph2_f;
+reg [3:0] div = 0;
 always @(posedge clk) begin
-	reg [3:0] div;
 	reg       ena, ena1;
 
 	ena1 <= ~pause;

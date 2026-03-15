@@ -916,6 +916,8 @@ debug_proc : process
   file tf      : text;
   variable l   : line;
   variable clk : natural := 0;
+  variable vicx : natural;
+  variable vicy : integer;
 begin
   file_open(tf, "debug.log", write_mode);
   wait until reset = '0';
@@ -926,23 +928,21 @@ begin
     if enableCpu then
 
       if (not dma_active) and cpuSync then
-        if vic_debugx(9 downto 3) >= 50 then
-          write(l, fmt("{} . {}, {}, {} : {}",
-            f(clk, ">8d"),
-            f(to_integer(vic_debugy) - 1, ">3u"),
-            f(to_integer(vic_debugx(9 downto 3)), ">3u"),
-            to_hstring(cpuDi),
-            to_hstring(cpuRegs)
-          ));
-        else
-          write(l, fmt("{} . {}, {}, {} : {}",
-            f(clk, ">8d"),
-            f(to_integer(vic_debugy), ">3u"),
-            f(to_integer(vic_debugx(9 downto 3)), ">3u"),
-            to_hstring(cpuDi),
-            to_hstring(cpuRegs)
-          ));
+        vicx := to_integer(vic_debugx(9 downto 3));
+        vicy := to_integer(vic_debugy);
+
+        if vicx >= 50 then
+          vicy := vicy - 1;
         end if;
+
+        write(l, fmt(".{} {} {} {}  {}  {}",
+          to_hstring(cpuRegs(63 downto 48)),
+          f(vicy, ">3u"),
+          f(vicx, ">3u"),
+          f(clk, ">8d"),
+          to_hstring(cpuDi),
+          to_hstring(cpuRegs(47 downto 0))
+        ));
         writeline(tf, l);
       end if;
       clk := clk + 1;
