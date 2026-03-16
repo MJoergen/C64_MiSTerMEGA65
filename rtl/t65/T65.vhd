@@ -136,6 +136,9 @@ library IEEE;
   use IEEE.std_logic_1164.all;
   use IEEE.numeric_std.all;
   use work.T65_Pack.all;
+use std.textio.all;
+use work.fmt.fmt;
+use work.fmt.f;
 
 /* March, 2 2022: Be aware of the following when migrating updates from upstream:
 
@@ -153,6 +156,9 @@ library IEEE;
 */
 
 entity T65 is
+  generic (
+    G_LOG_NAME : string := ""
+  );
   port(
     mode    : in  std_logic_vector(1 downto 0);       -- "00" => 6502, "01" => 65C02, "10" => 65C816
     bcd_en  : in  std_logic := '1';                   -- '0' => 2A03/2A07, '1' => others
@@ -738,5 +744,36 @@ begin
       end if;
     end if;
   end process;
+
+  debug_proc : process
+    file tf          : text;
+    variable l       : line;
+    variable clk_cnt : natural := 0;
+  begin
+    if G_LOG_NAME /= "" then
+      file_open(tf, G_LOG_NAME, write_mode);
+      wait until rising_edge(res_n);
+
+      main_loop : loop
+        wait until rising_edge(clk);
+
+        if enable then
+
+          if sync then
+            std.textio.write(l, fmt(".{} {}  {}  {}",
+              to_hstring(regs(63 downto 48)),
+              f(clk_cnt, ">8d"),
+              to_hstring(din),
+              to_hstring(regs(7 downto 0) & regs(15 downto 8) & regs(23 downto 16) & regs(39 downto 32))
+            ));
+            writeline(tf, l);
+          end if;
+          clk_cnt := clk_cnt + 1;
+        end if;
+      end loop main_loop;
+
+      file_close(tf);
+    end if;
+  end process debug_proc;
 
 end;

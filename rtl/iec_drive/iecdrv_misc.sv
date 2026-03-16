@@ -49,7 +49,7 @@ module iecdrv_mem #(parameter DATAWIDTH, ADDRWIDTH)
 	output reg [DATAWIDTH-1:0] q_b
 );
 
-reg [DATAWIDTH-1:0] ram[1<<ADDRWIDTH];
+reg [DATAWIDTH-1:0] ram[1<<ADDRWIDTH] = '{default:0};
 
 reg                 wren_a_d;
 reg [ADDRWIDTH-1:0] address_a_d;

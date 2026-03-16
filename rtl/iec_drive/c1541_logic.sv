@@ -108,7 +108,7 @@ wire  [7:0] cpu_di =
 	 rom_cs    ? rom_data :
 	 8'hFF;
 
-T65 cpu 
+T65 #("1541.log") cpu
 (
 	.mode(2'b00),
 	.res_n(~reset),
