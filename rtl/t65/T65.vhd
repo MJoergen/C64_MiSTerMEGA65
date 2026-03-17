@@ -774,6 +774,8 @@ begin
 
       file_close(tf);
     end if;
+
+    wait;
   end process debug_proc;
 
 end;

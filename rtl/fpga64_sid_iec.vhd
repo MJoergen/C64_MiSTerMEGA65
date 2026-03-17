@@ -927,7 +927,7 @@ begin
 
     if enableCpu then
 
-      if (not dma_active) and cpuSync then
+      if baLoc and cpuSync then
         vicx := to_integer(vic_debugx(9 downto 3));
         vicy := to_integer(vic_debugy);
 
@@ -941,7 +941,7 @@ begin
           f(vicx, ">3u"),
           f(clk, ">8d"),
           to_hstring(cpuDi),
-          to_hstring(cpuRegs(47 downto 0))
+          to_hstring(cpuRegs(7 downto 0) & cpuRegs(15 downto 8) & cpuRegs(23 downto 16) & cpuRegs(39 downto 32))
         ));
         writeline(tf, l);
       end if;
