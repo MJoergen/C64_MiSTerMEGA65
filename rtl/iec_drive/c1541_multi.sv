@@ -206,7 +206,7 @@ always @(posedge clk) begin
 	if(ph2_f)   state <= 0;
 
 	case(state)
-		0,1,2,3: mem_a <= {drv_addr[state[1:0]][14] & rom_sz_main[1], drv_addr[state[1:0]][13] & (rom_sz_main[0] | stdrom), drv_addr[state[1:0]][12:0]};
+		0: mem_a <= {drv_addr[state[1:0]][14] & rom_sz_main[1], drv_addr[state[1:0]][13] & (rom_sz_main[0] | stdrom), drv_addr[state[1:0]][12:0]};
 	endcase
 	
 	case(state)

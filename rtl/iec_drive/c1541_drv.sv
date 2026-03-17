@@ -78,7 +78,7 @@ assign led = act | sd_busy;
 
 reg        readonly = 0;
 reg        disk_present = 0;
-reg [24:0] ch_timeout;
+reg [21:0] ch_timeout;
 reg        present = 0;
 always @(posedge clk) begin
 	reg old_mounted;
@@ -143,7 +143,7 @@ c1541_logic c1541_logic
 	.freq(freq),
 	.sync_n(gcr_mode ? dgcr_sync_n : gcr_sync_n),
 	.byte_n(gcr_mode ? dgcr_byte_n : gcr_byte_n),
-	.wps_n(~readonly ^ ch_timeout[23]),
+	.wps_n(~readonly ^ ch_timeout[21]),
 	.tr00_sense_n(|track),
 	.act(act)
 );

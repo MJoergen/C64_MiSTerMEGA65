@@ -40,20 +40,20 @@ module c1541_gcr
 	input             sd_buff_wr
 );
 
-reg [12:0] buff_addr;
+reg [12:0] buff_addr = 0;
 wire [7:0] buff_do;
-reg  [7:0] buff_di;
+reg  [7:0] buff_di = 0;
 
-reg  [4:0] sector;
-reg        sync_in_n;
-reg        byte_in;
-reg  [8:0] byte_cnt;
-reg        nibble;
-reg        state;
-reg  [7:0] data_cks; 
-reg  [7:0] gcr_byte_out;
-reg  [4:0] gcr_nibble_out;
-reg  [7:0] hdr_cks;
+reg  [4:0] sector = 0;
+reg        sync_in_n = 0;
+reg        byte_in = 0;
+reg  [8:0] byte_cnt = 0;
+reg        nibble = 0;
+reg        state = 0;
+reg  [7:0] data_cks = 0;
+reg  [7:0] gcr_byte_out = 0;
+reg  [4:0] gcr_nibble_out = 0;
+reg  [7:0] hdr_cks = 0;
 
 reg  [7:0] id1=0, id2=0;
 
@@ -182,14 +182,15 @@ dualport_2clk_ram #(
 	.q_b(buff_do)   
 );
 
+reg       mode_r2 = 0;
+reg       autorise_write = 0;
+reg       autorise_count = 0;
+reg [5:0] sync_cnt = 0;
+reg [7:0] gcr_byte = 0;
+reg [2:0] bit_cnt = 0;
+reg [3:0] gcr_bit_cnt = 0;
+
 always @(posedge clk) begin
-	reg       mode_r2;
-	reg       autorise_write;
-	reg       autorise_count;
-	reg [5:0] sync_cnt;
-	reg [7:0] gcr_byte;
-	reg [2:0] bit_cnt;
-	reg [3:0] gcr_bit_cnt;
 
 	hdr_cks <= track ^ sector ^ id1 ^ id2;
 	we <= 0;
