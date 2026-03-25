@@ -913,11 +913,38 @@ dma_cycle <= '1' when (sysCycle >= CYCLE_CPU0 and sysCycle <= CYCLE_CPUF) and cp
 dma_din   <= cpuDi;
 
 debug_proc : process
-  file tf      : text;
-  variable l   : line;
-  variable clk : natural := 0;
-  variable vicx : natural;
-  variable vicy : integer;
+  file tf            : text;
+  variable l         : line;
+  variable clk       : natural := 0;
+  variable vicx      : natural;
+  variable vicy      : integer;
+  variable rdy_v     : std_logic := '1';
+  variable irq_n_v   : std_logic := '1';
+  variable dma_v     : std_logic := '1';
+  variable old_rdy   : std_logic := '1';
+  variable old_irq_n : std_logic := '1';
+  variable old_dma_v : std_logic := '1';
+
+  type str_vector is array (natural range <>) of string(1 to 3);
+  constant C_OPCODES : str_vector(0 to 255) := (
+    "BRK", "ORA", "   ", "   ", "   ", "ORA", "ASL", "   ", "PHP", "ORA", "ASL", "   ", "   ", "ORA", "ASL", "   ",
+    "BPL", "ORA", "   ", "   ", "   ", "ORA", "ASL", "   ", "CLC", "ORA", "   ", "   ", "   ", "ORA", "ASL", "   ",
+    "JSR", "AND", "   ", "   ", "BIT", "AND", "ROL", "   ", "PLP", "AND", "ROL", "   ", "BIT", "AND", "ROL", "   ",
+    "BMI", "AND", "   ", "   ", "   ", "AND", "ROL", "   ", "SEC", "AND", "   ", "   ", "   ", "AND", "ROL", "   ",
+    "RTI", "EOR", "   ", "   ", "   ", "EOR", "LSR", "   ", "PHA", "EOR", "LSR", "   ", "JMP", "EOR", "LSR", "   ",
+    "BVC", "EOR", "   ", "   ", "   ", "EOR", "LSR", "   ", "CLI", "EOR", "   ", "   ", "   ", "EOR", "LSR", "   ",
+    "RTS", "ADC", "   ", "   ", "   ", "ADC", "ROR", "   ", "PLA", "ADC", "ROR", "   ", "JMP", "ADC", "ROR", "   ",
+    "BVS", "ADC", "   ", "   ", "   ", "ADC", "ROR", "   ", "SEI", "ADC", "   ", "   ", "   ", "ADC", "ROR", "   ",
+    "   ", "STA", "   ", "   ", "STY", "STA", "STX", "   ", "DEY", "   ", "TXA", "   ", "STY", "STA", "STX", "   ",
+    "BCC", "STA", "   ", "   ", "STY", "STA", "STX", "   ", "TYA", "STA", "TXS", "   ", "   ", "STA", "   ", "   ",
+    "LDY", "LDA", "LDX", "   ", "LDY", "LDA", "LDX", "   ", "TAY", "LDA", "TAX", "   ", "LDY", "LDA", "LDX", "   ",
+    "BCS", "LDA", "   ", "   ", "LDY", "LDA", "LDX", "   ", "CLV", "LDA", "TSX", "   ", "LDY", "LDA", "LDX", "   ",
+    "CPY", "CMP", "   ", "   ", "CPY", "CMP", "DEC", "   ", "INY", "CMP", "DEX", "   ", "CPY", "CMP", "DEC", "   ",
+    "BNE", "CMP", "   ", "   ", "   ", "CMP", "DEC", "   ", "CLD", "CMP", "   ", "   ", "   ", "CMP", "DEC", "   ",
+    "CPX", "SBC", "   ", "   ", "CPX", "SBC", "INC", "   ", "INX", "SBC", "NOP", "   ", "CPX", "SBC", "INC", "   ",
+    "BEQ", "SBC", "   ", "   ", "   ", "SBC", "INC", "   ", "SED", "SBC", "   ", "   ", "   ", "SBC", "INC", "   "
+  );
+
 begin
   file_open(tf, "debug.log", write_mode);
   wait until reset = '0';
@@ -927,20 +954,52 @@ begin
 
     if enableCpu then
 
-      if baLoc and cpuSync then
-        vicx := to_integer(vic_debugx(9 downto 3));
-        vicy := to_integer(vic_debugy);
+      vicx := to_integer(vic_debugx(9 downto 3));
+      vicy := to_integer(vic_debugy);
 
-        if vicx >= 50 then
-          vicy := vicy - 1;
-        end if;
+      if vicx >= 50 then
+        vicy := vicy - 1;
+      end if;
 
-        write(l, fmt(".{} {} {} {}  {}  {}",
+      irq_n_v := irq_cia1 and irq_vic and irq_n and irq_ext_n;
+      rdy_v   := baLoc;
+      dma_v   := dma_active;
+
+      if (old_rdy /= rdy_v) or (old_irq_n /= irq_n_v) or (old_dma_v /= dma_v) then
+        std.textio.write(l, fmt("      {} {} {}  RDY={} IRQ={} DMA={}",
+          f(vicy, ">3u"),
+          f(vicx, ">3u"),
+          f(clk, ">8d"),
+          to_string(rdy_v),
+          to_string(irq_n_v),
+          to_string(dma_v)
+        ));
+        writeline(tf, l);
+
+        old_rdy   := rdy_v;
+        old_irq_n := irq_n_v;
+        old_dma_v := dma_v;
+      end if;
+
+      if cpuAddr_pre(15 downto 12) = X"D" and cpuWe_pre = '1' then
+        std.textio.write(l, fmt("      {} {} {}  Write ${} to ${}",
+          f(vicy, ">3u"),
+          f(vicx, ">3u"),
+          f(clk, ">8d"),
+          to_hstring(cpuDo_pre),
+          to_hstring(cpuAddr_pre)
+        ));
+        writeline(tf, l);
+      end if;
+
+      if baLoc and cpuSync and (not dma_active) then
+        write(l, fmt(".{} {} {} {}  {}  {}  {}",
           to_hstring(cpuRegs(63 downto 48)),
           f(vicy, ">3u"),
           f(vicx, ">3u"),
           f(clk, ">8d"),
           to_hstring(cpuDi),
+          C_OPCODES(to_integer(cpuDi)),
           to_hstring(cpuRegs(7 downto 0) & cpuRegs(15 downto 8) & cpuRegs(23 downto 16) & cpuRegs(39 downto 32))
         ));
         writeline(tf, l);

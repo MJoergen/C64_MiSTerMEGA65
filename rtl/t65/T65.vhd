@@ -746,9 +746,32 @@ begin
   end process;
 
   debug_proc : process
-    file tf          : text;
-    variable l       : line;
-    variable clk_cnt : natural := 0;
+    file tf            : text;
+    variable l         : line;
+    variable clk_cnt   : natural := 0;
+    variable old_rdy   : std_logic := '1';
+    variable old_irq_n : std_logic := '1';
+
+    type str_vector is array (natural range <>) of string(1 to 3);
+    constant C_OPCODES : str_vector(0 to 255) := (
+      "BRK", "ORA", "   ", "   ", "   ", "ORA", "ASL", "   ", "PHP", "ORA", "ASL", "   ", "   ", "ORA", "ASL", "   ",
+      "BPL", "ORA", "   ", "   ", "   ", "ORA", "ASL", "   ", "CLC", "ORA", "   ", "   ", "   ", "ORA", "ASL", "   ",
+      "JSR", "AND", "   ", "   ", "BIT", "AND", "ROL", "   ", "PLP", "AND", "ROL", "   ", "BIT", "AND", "ROL", "   ",
+      "BMI", "AND", "   ", "   ", "   ", "AND", "ROL", "   ", "SEC", "AND", "   ", "   ", "   ", "AND", "ROL", "   ",
+      "RTI", "EOR", "   ", "   ", "   ", "EOR", "LSR", "   ", "PHA", "EOR", "LSR", "   ", "JMP", "EOR", "LSR", "   ",
+      "BVC", "EOR", "   ", "   ", "   ", "EOR", "LSR", "   ", "CLI", "EOR", "   ", "   ", "   ", "EOR", "LSR", "   ",
+      "RTS", "ADC", "   ", "   ", "   ", "ADC", "ROR", "   ", "PLA", "ADC", "ROR", "   ", "JMP", "ADC", "ROR", "   ",
+      "BVS", "ADC", "   ", "   ", "   ", "ADC", "ROR", "   ", "SEI", "ADC", "   ", "   ", "   ", "ADC", "ROR", "   ",
+      "   ", "STA", "   ", "   ", "STY", "STA", "STX", "   ", "DEY", "   ", "TXA", "   ", "STY", "STA", "STX", "   ",
+      "BCC", "STA", "   ", "   ", "STY", "STA", "STX", "   ", "TYA", "STA", "TXS", "   ", "   ", "STA", "   ", "   ",
+      "LDY", "LDA", "LDX", "   ", "LDY", "LDA", "LDX", "   ", "TAY", "LDA", "TAX", "   ", "LDY", "LDA", "LDX", "   ",
+      "BCS", "LDA", "   ", "   ", "LDY", "LDA", "LDX", "   ", "CLV", "LDA", "TSX", "   ", "LDY", "LDA", "LDX", "   ",
+      "CPY", "CMP", "   ", "   ", "CPY", "CMP", "DEC", "   ", "INY", "CMP", "DEX", "   ", "CPY", "CMP", "DEC", "   ",
+      "BNE", "CMP", "   ", "   ", "   ", "CMP", "DEC", "   ", "CLD", "CMP", "   ", "   ", "   ", "CMP", "DEC", "   ",
+      "CPX", "SBC", "   ", "   ", "CPX", "SBC", "INC", "   ", "INX", "SBC", "NOP", "   ", "CPX", "SBC", "INC", "   ",
+      "BEQ", "SBC", "   ", "   ", "   ", "SBC", "INC", "   ", "SED", "SBC", "   ", "   ", "   ", "SBC", "INC", "   "
+    );
+
   begin
     if G_LOG_NAME /= "" then
       file_open(tf, G_LOG_NAME, write_mode);
@@ -758,12 +781,23 @@ begin
         wait until rising_edge(clk);
 
         if enable then
+          if (old_rdy /= rdy) or (old_irq_n /= irq_n) then
+            std.textio.write(l, fmt("RDY={} IRQ={}",
+              to_string(rdy),
+              to_string(irq_n)
+            ));
+            writeline(tf, l);
+
+            old_rdy   := rdy;
+            old_irq_n := irq_n;
+          end if;
 
           if sync then
-            std.textio.write(l, fmt(".{} {}  {}  {}",
+            std.textio.write(l, fmt(".{} {}  {}  {}  {}",
               to_hstring(regs(63 downto 48)),
               f(clk_cnt, ">8d"),
               to_hstring(din),
+              C_OPCODES(to_integer(unsigned(din))),
               to_hstring(regs(7 downto 0) & regs(15 downto 8) & regs(23 downto 16) & regs(39 downto 32))
             ));
             writeline(tf, l);

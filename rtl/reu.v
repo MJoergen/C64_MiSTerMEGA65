@@ -47,8 +47,8 @@ localparam STATE_EVAL     = 1;
 localparam STATE_PROC_C64 = 2;
 localparam STATE_PROC_RAM = 3;
 
-reg  [19:0] op;
-reg   [2:0] stage;
+reg  [19:0] op = 0;
+reg   [2:0] stage = 0;
 wire [19:0] op_cur = op >> (stage*4);
 wire        op_dev = op_cur[0];   // 0: C64, 1: RAM
 wire        op_dat = op_cur[1];   // storage
