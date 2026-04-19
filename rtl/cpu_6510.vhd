@@ -58,6 +58,9 @@ architecture rtl of cpu_6510 is
 begin
 
    cpu: entity work.T65
+	generic map(
+  G_LOG_NAME => "cpu.log"
+             )
 	port map(
     sync    => sync,
 		Mode    => "00",
