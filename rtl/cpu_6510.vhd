@@ -17,6 +17,7 @@
 library IEEE;
 use ieee.std_logic_1164.ALL;
 use ieee.numeric_std.ALL;
+  use work.T65_Pack.all;
 
 -- -----------------------------------------------------------------------
 
@@ -49,6 +50,8 @@ architecture rtl of cpu_6510 is
 	signal localDi : std_logic_vector(7 downto 0);
 	signal localDo : std_logic_vector(7 downto 0);
 	signal localWe : std_logic;
+  signal localDebug : T_t65_dbg;
+  signal localFetch : std_logic;
 
 	signal currentIO : std_logic_vector(7 downto 0);
 	signal ioDir : std_logic_vector(7 downto 0);
@@ -58,9 +61,6 @@ architecture rtl of cpu_6510 is
 begin
 
    cpu: entity work.T65
-	generic map(
-  G_LOG_NAME => "cpu.log"
-             )
 	port map(
     sync    => sync,
 		Mode    => "00",
@@ -77,8 +77,33 @@ begin
 		din     => localDi,   -- changed to "din" due to the issue described in T65.vhd, section "March, 2 2022"
 		dout    => localDo,   -- changed to "dout", ditto.
     regs    => regs,
-		NMI_ack => nmi_ack
+    debug   => localDebug,
+		NMI_ack => nmi_ack,
+    fetch   => localFetch
 	);
+
+  debug_inst : entity work.debug
+    generic map (
+      G_LOG_NAME      => "cpu.log",
+      G_ENABLE_IOPORT => true,
+      G_VARIANT       => "6502",
+      G_VERBOSE       => 2
+    )
+    port map (
+      clk_i       => clk,
+      rst_i       => reset,
+      ce_i        => enable and rdy,
+      sync_i      => sync,
+      invalid_i   => X"00",
+      addr_i      => localA(15 downto 0),
+      rd_data_i   => localDi,
+      wr_data_i   => localDo,
+      regs_i      => localDebug.a & localDebug.x & localDebug.y & localDebug.s,
+      ioport_i    => currentIO & ioDir & ioData,
+      mem_read_i  => localWe and (not localFetch),
+      mem_write_i => not (localWe) and (not localFetch),
+      debug_o     => open
+    ); -- debug_inst : entity work.debug
 
 	accessIO <= '1' when localA(15 downto 1) = X"000"&"000" else '0';
 	localDi  <= localDo when localWe = '0' else std_logic_vector(di) when accessIO = '0' else ioDir when localA(0) = '0' else currentIO;

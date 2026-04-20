@@ -186,7 +186,8 @@ entity T65 is
     -- 6502 registers (MSB) PC, SP, P, Y, X, A (LSB)
     regs    : out std_logic_vector(63 downto 0);
     debug   : out T_t65_dbg;
-    nmi_ack : out std_logic
+    nmi_ack : out std_logic;
+    fetch   : out std_logic
   );
 end T65;
 
@@ -277,6 +278,8 @@ architecture rtl of T65 is
   signal NMI_entered    : std_logic;
 
 begin
+  fetch <= '1' when Set_Addr_To_r = Set_Addr_To_PBR else '0';
+
   NMI_ack <= NMIAct;
 
   -- gate Rdy with read/write to make an "OK, it's really OK to stop the processor 
@@ -744,29 +747,6 @@ begin
       end if;
     end if;
   end process;
-
-  debug_inst : entity work.debug
-    generic map (
-      G_LOG_NAME      => G_LOG_NAME,
-      G_ENABLE_IOPORT => true,
-      G_VARIANT       => "6502",
-      G_VERBOSE       => 1
-    )
-    port map (
-      clk_i       => clk,
-      rst_i       => not res_n,
-      ce_i        => enable,
-      sync_i      => sync,
-      invalid_i   => X"00",
-      addr_i      => a(15 downto 0),
-      rd_data_i   => din,
-      wr_data_i   => dout,
-      regs_i      => debug.a & debug.x & debug.y & debug.s,
-      ioport_i    => X"000000",
-      mem_read_i  => '0',
-      mem_write_i => '0',
-      debug_o     => open
-    ); -- debug_inst : entity work.debug
 
 --  debug_proc : process
 --    file tf            : text;
