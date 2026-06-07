@@ -54,6 +54,16 @@
 -- that cs_romH is not activated.
 -- -----------------------------------------------------------------------
 
+-- -----------------------------------------------------------------------
+-- sy2002 6/7/26
+--
+-- Implemented turbo-mode protections for hardware cartridges
+-- as described here:
+--
+-- https://github.com/MJoergen/C64MEGA65/issues/87#issuecomment-4643004168
+--
+-- See the comment at the cs_turbo_eligible_o formula below for details
+-- -----------------------------------------------------------------------
 
 library IEEE;
 USE ieee.std_logic_1164.ALL;
@@ -126,7 +136,11 @@ entity fpga64_buslogic is
       c64rom_we_i     : in std_logic;
 		c64rom_addr_i   : in std_logic_vector(13 downto 0);
 		c64rom_data_i   : in std_logic_vector(7 downto 0);
-		c64rom_data_o   : out std_logic_vector(7 downto 0)		
+		c64rom_data_o   : out std_logic_vector(7 downto 0);
+
+		-- C64MEGA65 turbo-mode protection for hardware cartridges (sy2002 6/7/26)
+		sim_crt_i           : in  std_logic;
+		cs_turbo_eligible_o : out std_logic
 	);
 end fpga64_buslogic;
 
@@ -433,7 +447,25 @@ begin
    -- without a larger refactoring. So the solution is to clean up the signal outside of fpga64_buslogic.vhd
    -- and inside fpga64_sid_iec.vhd: Search for: 4/7/23 by sy2002: added "and (romL = '0' and romH = '0' and UMAXromH = '0')"
 	cs_ram <= cs_ramLoc or cs_romLLoc or cs_romHLoc or cs_UMAXromHLoc or cs_UMAXnomapLoc or cs_CharLoc or cs_romLoc;
-	
+
+   -- 6/7/26 by sy2002: C64MEGA65 turbo-mode protection for hardware cartridges
+   --
+	-- Narrower companion of cs_ram for the turbo cycles of cpu_cyc in fpga64_sid_iec.vhd.
+	-- Includes only chip-selects that target fast internal memory:
+	--   cs_ramLoc            — main DRAM (BRAM here), fast.
+	--   cs_CharLoc           — character ROM, internal BRAM, fast.
+	--   cs_romLoc            — BASIC / KERNAL ROM, internal BRAM, fast.
+	--   cs_romLLoc/HLoc/UMAXromHLoc — cartridge ROM, fast ONLY in SIMCRT mode (BRAM cache).
+	--                          In hardware-cart mode they would force a 1 MHz expansion-port
+	--                          access, so they are masked out by sim_crt_i.
+	-- Deliberately excluded:
+	--   cs_UMAXnomapLoc      — Ultimax unmapped (IDE64 path); always served by the physical
+	--                          cart, never turbo-eligible.
+	--   cs_ioE / cs_ioF      — cart bank-switch registers; must run at 1 MHz on real carts
+	--                          AND are already auto-slowed via the io_enable clause of CPUC.
+	cs_turbo_eligible_o <= cs_ramLoc or cs_CharLoc or cs_romLoc
+	                    or (sim_crt_i and (cs_romLLoc or cs_romHLoc or cs_UMAXromHLoc));
+
 	cs_vic <= cs_vicLoc and io_enable;
 	cs_sid <= cs_sidLoc and io_enable;
 	cs_color <= cs_colorLoc and io_enable;
@@ -441,10 +473,10 @@ begin
 	cs_cia2 <= cs_cia2Loc and io_enable;
 	cs_ioE <= cs_ioELoc and io_enable;
 	cs_ioF <= cs_ioFLoc and io_enable;
-	cs_romL <= cs_romLLoc and not aec;       -- 4/7/23 added and not aec by sy2002
-	cs_romH <= cs_romHLoc and not aec;       -- 4/7/23 added and not aec by sy2002
-	cs_UMAXromH   <= cs_UMAXromHLoc and aec;   -- 4/7/23 added and aec by sy2002
-	cs_UMAXnomap  <= cs_UMAXnomapLoc;          -- 6/29/25 added by sy2002
+	cs_romL <= cs_romLLoc and not aec;          -- 4/7/23 added and not aec by sy2002
+	cs_romH <= cs_romHLoc and not aec;          -- 4/7/23 added and not aec by sy2002
+	cs_UMAXromH   <= cs_UMAXromHLoc and aec;    -- 4/7/23 added and aec by sy2002
+	cs_UMAXnomap  <= cs_UMAXnomapLoc;           -- 6/29/25 added by sy2002
 
 	dataToVic  <= unsigned(charData) when vicCharLoc = '1' else ramData;
 	systemAddr <= currentAddr;

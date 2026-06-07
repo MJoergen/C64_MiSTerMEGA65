@@ -43,7 +43,8 @@
 --   as possible for Expansion Port cartridges without refactoring
 --   the very basic architecture of the state machine (see _proc)
 -- * Heavily improved hardware cartridge compatibility:
---   Fixing ramCE by respecting romL, romH, UMAXromH and UMAXnomap
+--   Fixing ramCE by respecting romL, romH, UMAXromH and UMAXnomap,
+--   cs_turbo_eligible so that HW carts still work in turbo mode
 -- * Refined access to the custom Kernal
 --
 -- -----------------------------------------------------------------------
@@ -87,6 +88,11 @@ port(
 	cia_mode    : in  std_logic;
 	turbo_mode  : in  std_logic_vector(1 downto 0);
 	turbo_speed : in  std_logic_vector(1 downto 0);
+
+	-- C64MEGA65 turbo-mode protection for hardware cartridges
+	-- '1' = SIMCRT mode (cart ROM in BRAM bank cache, turbo-eligible)
+	-- '0' = hardware cartridge mode (physical expansion port, must run at 1 MHz)
+	sim_crt_i   : in  std_logic;
 
 	-- VGA/SCART interface
 	ntscMode    : in  std_logic;
@@ -234,6 +240,7 @@ signal cs_color     : std_logic;
 signal cs_cia1      : std_logic;
 signal cs_cia2      : std_logic;
 signal cs_ram       : std_logic;
+signal cs_turbo_eligible : std_logic; -- C64MEGA65: narrower companion of cs_ram for the turbo cycles of cpu_cyc;
 signal cpuWe        : std_logic;
 signal cpuWe_pre    : std_logic;
 signal cpuAddr      : unsigned(15 downto 0);
@@ -545,7 +552,11 @@ port map (
    c64rom_we_i    => c64rom_we_i,
 	c64rom_addr_i  => c64rom_addr_i,
    c64rom_data_i  => c64rom_data_i,
-	c64rom_data_o  => c64rom_data_o		
+	c64rom_data_o  => c64rom_data_o,
+
+	-- C64MEGA65 turbo-mode support 6/7/26 by sy2002
+	sim_crt_i           => sim_crt_i,
+	cs_turbo_eligible_o => cs_turbo_eligible
 );
 
 IOE <= ioe_i;
@@ -884,10 +895,19 @@ ramWE   <= systemWe when sysCycle >= CYCLE_CPU0 else '0';
 -- in the case of an IDE64
 ramCE   <= cs_ram when (sysCycle = CYCLE_VIC0 or cpu_cyc = '1') and (romL = '0' and romH = '0' and UMAXromH = '0' and UMAXnomap = '0') else '0';
 
-cpu_cyc <= '1' when 
-				(sysCycle = CYCLE_CPU0 and turbo_m(0) = '1' and cs_ram = '1' ) or
-				(sysCycle = CYCLE_CPU4 and turbo_m(1) = '1' and cs_ram = '1' ) or
-				(sysCycle = CYCLE_CPU8 and turbo_m(2) = '1' and cs_ram = '1' ) or
+-- 6/7/26 by sy2002:
+--
+-- C64MEGA65 turbo-mode protection for hardware cartridges:
+-- https://github.com/MJoergen/C64MEGA65/issues/87#issuecomment-4643004168
+--
+-- The CPU0/4/8 turbo conjuncts use cs_turbo_eligible instead of the overloaded cs_ram
+-- so that hardware-cartridge accesses cannot trigger an early CPU advance and break
+-- the cart's PHI2 timing. The CYCLE_CPUC clause stays on cs_ram so that a hardware-cart
+-- access still completes at the natural 1 MHz slot.
+cpu_cyc <= '1' when
+				(sysCycle = CYCLE_CPU0 and turbo_m(0) = '1' and cs_turbo_eligible = '1' ) or
+				(sysCycle = CYCLE_CPU4 and turbo_m(1) = '1' and cs_turbo_eligible = '1' ) or
+				(sysCycle = CYCLE_CPU8 and turbo_m(2) = '1' and cs_turbo_eligible = '1' ) or
 				(sysCycle = CYCLE_CPUC and (io_enable = '1'  or cs_ram = '1')) else '0';
 				
 process(clk32)
