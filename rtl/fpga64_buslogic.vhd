@@ -63,6 +63,8 @@ entity fpga64_buslogic is
 	port (
 		clk         : in std_logic;
 		reset       : in std_logic;
+      uart_rxd_i              : in std_logic;
+      uart_txd_o              : out std_logic;
 		
 		-- Select C64's ROM:
 		-- 0 Custom
@@ -164,8 +166,20 @@ architecture rtl of fpga64_buslogic is
 	signal ultimax        : std_logic;
 
 	signal currentAddr    : unsigned(15 downto 0);
+
+signal    wbus_cyc   : std_logic;
+signal    wbus_stb   : std_logic;
+signal    wbus_addr  : std_logic_vector(13 downto 0);
+signal    wbus_ack   : std_logic;
+signal    wbus_rddat : std_logic_vector(7 downto 0);
+signal    clk_fast   : std_logic;
+signal    rst_fast   : std_logic := '1';
+signal    fast_fb_mmcm  : std_logic;
+signal    fast_clk_mmcm : std_logic;
+signal    fast_locked   : std_logic;
 	
 begin
+
 	chargen: entity work.dprom
 	generic map ("./roms/chargen.mif", 12)
 	port map
@@ -220,16 +234,79 @@ begin
 		q_b          => c64rom_data_o		 
    );
    
+   i_clk_fast : PLLE2_BASE
+      generic map (
+         BANDWIDTH            => "OPTIMIZED",
+         CLKFBOUT_MULT        => 30,         -- 1000 MHz
+         CLKFBOUT_PHASE       => 0.000,
+         CLKIN1_PERIOD        => 30.0,       -- INPUT @ 33 MHz
+         CLKOUT0_DIVIDE       => 4,          -- FAST @ 250 MHz
+         CLKOUT0_DUTY_CYCLE   => 0.500,
+         CLKOUT0_PHASE        => 0.000,
+         DIVCLK_DIVIDE        => 1,
+         REF_JITTER1          => 0.010,
+         STARTUP_WAIT         => "FALSE"
+      )
+      port map (
+         CLKFBIN             => fast_fb_mmcm,
+         CLKFBOUT            => fast_fb_mmcm,
+         CLKIN1              => clk,
+         CLKOUT0             => fast_clk_mmcm,
+         LOCKED              => fast_locked,
+         PWRDWN              => '0',
+         RST                 => '0'
+      ); -- i_clk_fast
+
+   fast_clk_bufg : BUFG
+      port map (
+         I => fast_clk_mmcm,
+         O => clk_fast
+      );
+
+  rst_fast <= not fast_locked when rising_edge(clk_fast);
+
+
 	kernel_c64std: entity work.dprom
 	generic map ("./roms/std_C64.mif", 14)
 	port map
 	(
-		wrclock => clk,
+		wrclock   => clk_fast,
+		wraddress => wbus_addr,
+		data	    => (others => '0'),
+		wren      => '0',
+    wrq       => wbus_rddat,
+
 		rdclock => clk,
 
 		rdaddress => std_logic_vector(cpuAddr(14) & cpuAddr(12 downto 0)),
 		q => romData_c64std
 	);
+
+uart_crc_inst : entity work.uart_crc
+  generic map (
+    G_ADDR_SIZE => 14,
+    G_DATA_SIZE => 8,
+    G_CLOCK_KHZ => 32_000,
+    G_BAUDRATE  => 2_000_000
+  )
+  port map (
+    clk_i        => clk        ,
+    rst_i        => reset        ,
+    uart_tx_o    => uart_txd_o    ,
+    uart_rx_i    => uart_rxd_i    ,
+    fast_clk_i   => clk_fast   ,
+    fast_rst_i   => rst_fast   ,
+    wbus_cyc_o   => wbus_cyc   ,
+    wbus_stall_i => '0' ,
+    wbus_stb_o   => wbus_stb   ,
+    wbus_addr_o  => wbus_addr  ,
+    wbus_we_o    => open    ,
+    wbus_wrdat_o => open ,
+    wbus_ack_i   => wbus_ack   ,
+    wbus_rddat_i => wbus_rddat 
+  );
+
+  wbus_ack <= wbus_cyc and wbus_stb when rising_edge(clk_fast);
 
 	kernel_c64jap: entity work.dprom
 	generic map ("./roms/jap_C64.mif", 14)

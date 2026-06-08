@@ -60,6 +60,8 @@ port(
 	clk32       : in  std_logic;
 	clk32_speed : in  natural; -- exact value; used to avoid clock drift at the time-of-day clock
 	reset_n     : in  std_logic;
+      uart_rxd_i              : in std_logic;
+      uart_txd_o              : out std_logic;
 	
    -- Select C64's ROM: 0=Custom, 1=Standard, 2=GS, 3=Japan
 	bios        : in  std_logic_vector(1 downto 0);
@@ -495,6 +497,8 @@ port map (
 	clk => clk32,
 	reset => reset,
 	bios => bios,
+      uart_rxd_i              => uart_rxd_i,
+      uart_txd_o              => uart_txd_o,
 
 	cpuHasBus => cpuHasBus,
 	aec => aec,

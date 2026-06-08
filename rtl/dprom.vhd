@@ -19,6 +19,7 @@ entity dprom is
 		wraddress : in  std_logic_vector((ADDR_WIDTH - 1) downto 0) := (others => '0');
 		data	    : in  std_logic_vector((DATA_WIDTH - 1) downto 0) := (others => '0');
 		wren      : in  std_logic := '0';
+    wrq       : out std_logic_vector((DATA_WIDTH - 1) downto 0);
 
 		rdclock   : in  std_logic;
 		rdaddress : in  std_logic_vector((ADDR_WIDTH - 1) downto 0);
@@ -59,6 +60,7 @@ begin
 	-- WR Port
 	process(wrclock) begin
 		if(rising_edge(wrclock)) then 
+      wrq <= ram(to_integer(unsigned(wraddress)));
 			if(wren = '1') then
 				ram(to_integer(unsigned(wraddress))) := data;
 			end if;
