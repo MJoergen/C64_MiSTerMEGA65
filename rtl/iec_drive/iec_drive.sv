@@ -61,7 +61,15 @@ localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
 localparam N   = NDR - 1;
 
 reg [N:0] dtype[2];
-always @(posedge clk_sys) for(int i=0; i<NDR; i=i+1) if(img_mounted[i] && img_size) {dtype[1][i],dtype[0][i]} <= img_type;
+// MEGA65 (D81 enable, sy2002): re-homed from clk_sys to clk. Upstream MiSTer sources
+// img_mounted/img_size/img_type from hps_io on clk_sys, so latching on posedge clk_sys was
+// same-domain. In the M2M port these three come from vdrives, which resynchronizes them into
+// the CORE clock domain (clk = clk_main_i). Sampling them on the QNICE clock (clk_sys) was an
+// unsynchronized CDC: D64 survived it only because dtype powers up to 0 (= 1541), but a D81
+// (img_type=10) needs this latch to actually capture a non-zero value across the boundary.
+// Latch in the signals own domain instead. dtype is quasi-static (changes only on a mount),
+// so its use as the clk_sys-domain sd_lba/sd_rd mux select stays safe.
+always @(posedge clk) for(int i=0; i<NDR; i=i+1) if(img_mounted[i] && img_size) {dtype[1][i],dtype[0][i]} <= img_type;
 
 assign led          = c1581_led      | c1541_led;     // MEGA65 (D81): 1581 engine enabled
 assign iec_data_o   = c1581_iec_data & c1541_iec_data;
