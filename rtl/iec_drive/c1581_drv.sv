@@ -234,6 +234,7 @@ wire floppy_ready;
 fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 (
 	.clkcpu(clk),
+	.clk_sys(clk_sys),   // MEGA65: SD interface re-clocked to QNICE domain (vdrives), see fdc1772.v CDC
 	.clk8m_en(wd_ce),
 
 	.floppy_drive(1'b0),

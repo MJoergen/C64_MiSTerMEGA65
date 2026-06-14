@@ -63,11 +63,21 @@ localparam N   = NDR - 1;
 reg [N:0] dtype[2];
 always @(posedge clk_sys) for(int i=0; i<NDR; i=i+1) if(img_mounted[i] && img_size) {dtype[1][i],dtype[0][i]} <= img_type;
 
-assign led          = /*c1581_led       |*/ c1541_led;
-assign iec_data_o   = /*c1581_iec_data  &*/ c1541_iec_data;
-assign iec_clk_o    = /*c1581_iec_clk   &*/ c1541_iec_clk;
-assign par_stb_o    = c1581_stb_o     & c1541_stb_o;
-assign par_data_o   = c1581_par_o     & c1541_par_o;
+assign led          = c1581_led      | c1541_led;     // MEGA65 (D81): 1581 engine enabled
+assign iec_data_o   = c1581_iec_data & c1541_iec_data;
+assign iec_clk_o    = c1581_iec_clk  & c1541_iec_clk;
+assign par_stb_o    = c1581_stb_o    & c1541_stb_o;
+assign par_data_o   = c1581_par_o    & c1541_par_o;
+
+// MEGA65 (D81): ROM readback mux. c1541 custom-DOS ROM when rom_addr_i[15]=0, c1581 when
+// =1. The ROM slots are FALLING_A (QNICE writes/reads on the falling edge of clk_sys), so
+// the select bit is captured on the SAME falling edge to stay aligned with the q_a read
+// data. (Readback only -- the auto-loader never reads ROMs back; this is forward-proofing
+// for any future verify-after-write of the 1581 JiffyDOS image.)
+wire [7:0] c1541_rom_data_o, c1581_rom_data_o;
+reg        rom_sel_d;
+always @(negedge clk_sys) rom_sel_d <= rom_addr_i[15];
+assign rom_data_o = rom_sel_d ? c1581_rom_data_o : c1541_rom_data_o;
 
 always_comb for(int i=0; i<NDR; i=i+1) begin
 	sd_buff_din[i] = (dtype[1][i] ? c1581_sd_buff_dout[i] : c1541_sd_buff_dout[i] );
@@ -94,8 +104,8 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 	.gcr_mode(dtype[0]),
 
 	.iec_atn_i (iec_atn_i),
-	.iec_data_i(iec_data_i /*& c1581_iec_data */),
-	.iec_clk_i (iec_clk_i  /*& c1581_iec_clk */),
+	.iec_data_i(iec_data_i & c1581_iec_data),
+	.iec_clk_i (iec_clk_i  & c1581_iec_clk),
 	.iec_data_o(c1541_iec_data),
 	.iec_clk_o (c1541_iec_clk),
 
@@ -111,7 +121,7 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 
 	.rom_addr_i(rom_addr_i[14:0]),
 	.rom_data_i(rom_data_i),
-	.rom_data_o(rom_data_o),
+	.rom_data_o(c1541_rom_data_o),
 	.rom_wr_i(~rom_addr_i[15] & rom_wr_i),
 	.rom_std_i(rom_std_i),
 
@@ -137,7 +147,12 @@ wire  [N:0] c1581_led;
 wire  [7:0] c1581_sd_buff_dout[NDR];
 wire [31:0] c1581_sd_lba[NDR];
 wire  [N:0] c1581_sd_rd, c1581_sd_wr;
-/* //When commenting-in this here, don't forget to comment-in above c1581_iec_data, c1581_iec_clk, c1581_led 
+// MEGA65 (D81 enable, sy2002): the 1581 engine is now active. Reset is released only when
+// drive 8 has a D81 mounted (dtype[1]=1); a D64 holds it in reset so only one engine drives
+// the IEC bus at a time (AND-wired, safe by construction -- a reset drive contributes '1').
+// The stale signal names in the original commented block (rom_addr/rom_data/rom_wr/rom_std)
+// are corrected to the actual _i-suffixed ports; bit15 of rom_addr_i selects the 1581 ROM
+// window. iec_fclk_o and pwr_led are intentionally left unconnected (C64 has no fast serial).
 c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 (
 	.clk(clk),
@@ -161,10 +176,11 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.clk_sys(clk_sys),
 	.pause(pause),
 
-	.rom_addr(rom_addr[14:0]),
-	.rom_data(rom_data),
-	.rom_wr(rom_addr[15] & rom_wr),
-	.rom_std(rom_std),
+	.rom_addr(rom_addr_i[14:0]),
+	.rom_data(rom_data_i),
+	.rom_data_o(c1581_rom_data_o),
+	.rom_wr(rom_addr_i[15] & rom_wr_i),
+	.rom_std(rom_std_i),
 
 	.img_mounted(img_mounted),
 	.img_size(img_size),
@@ -179,5 +195,4 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.sd_buff_din(c1581_sd_buff_dout),
 	.sd_buff_wr(sd_buff_wr)
 );
-*/
 endmodule

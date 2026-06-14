@@ -52,6 +52,7 @@ module c1581_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 
 	input  [14:0] rom_addr,
 	input   [7:0] rom_data,
+	output  [7:0] rom_data_o,
 	input         rom_wr,
 	input         rom_std
 );
@@ -92,14 +93,27 @@ always @(posedge clk) begin
 end
 
 wire [7:0] rom_do;
+wire [7:0] qnice_rom_do;       // MEGA65: readback of the writable (custom DOS) slot -> rom_data_o
 generate
 	if(PARPORT || DUALROM) begin
-		iecdrv_mem #(8,15,"./c1581_rom.mif") rom
+		// MEGA65 (sy2002/D81 enable): the original `iecdrv_mem #(8,15,"./c1581_rom.mif") rom`
+		// was a Quartus-only elaboration error (3 positional params to the 2-param Vivado
+		// iecdrv_mem, posedge-A, .mif). Mirror the romstd instance below: a Vivado-compatible
+		// iecdrv_mem_rom on the QNICE falling edge. INITFILE preloads the writable slot with
+		// the STANDARD 1581 DOS (upstream semantics) so a missing jd-c1581.bin degrades to
+		// stock 1581 instead of a dead drive. q_a feeds the QNICE readback (rom_data_o).
+		iecdrv_mem_rom #(
+		   .DATAWIDTH(8),
+		   .ADDRWIDTH(15),
+		   .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1581_rom.mif.hex"),
+		   .FALLING_A(1'b1)
+		) rom
 		(
 			.clock_a(clk_sys),
 			.address_a(rom_addr),
 			.data_a(rom_data),
 			.wren_a(rom_wr),
+			.q_a(qnice_rom_do),
 
 			.clock_b(clk),
 			.address_b(mem_a),
@@ -107,9 +121,11 @@ generate
 		);
 	end
 	else begin
-		assign rom_do = romstd_do;
+		assign rom_do       = romstd_do;
+		assign qnice_rom_do = 8'hFF;   // no writable slot in this config
 	end
 endgenerate
+assign rom_data_o = qnice_rom_do;
 
 wire [7:0] romstd_do;
 iecdrv_mem_rom #(

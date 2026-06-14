@@ -26,6 +26,7 @@
 
 module fdc1772 (
 	input            clkcpu, // system cpu clock.
+	input            clk_sys, // MEGA65: QNICE clock for the SD/vdrives interface (CDC, sy2002/D81)
 	input            clk8m_en,
 
 	// external set signals
@@ -77,15 +78,19 @@ localparam WIDX = $clog2(FD_NUM);
 // --------------------- IO controller image handling ----------------------
 // -------------------------------------------------------------------------
 
+// MEGA65 (D81 enable): sd_lba is computed combinationally here from the (clkcpu-domain,
+// quasi-static) track/sector, but DRIVEN onto the output by the clk_sys SD FSM (label3),
+// which latches this stable value at the start of each transfer. See sd_lba_comb -> sd_lba.
+reg [31:0] sd_lba_comb;
 always @(*) begin
 	case (SECTOR_SIZE_CODE)
 	// archie
-	3: sd_lba = {(16'd0 + (fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0], s_odd };
+	3: sd_lba_comb = {(16'd0 + (fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0], s_odd };
 	// st
-	2: sd_lba = ((fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0] - 1'd1;
+	2: sd_lba_comb = ((fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0] - 1'd1;
 	// bbc micro
-	1: sd_lba = (((fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0]) >> 1;
-	default: sd_lba = 0;
+	1: sd_lba_comb = (((fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0]) >> 1;
+	default: sd_lba_comb = 0;
 	endcase
 end
 
@@ -368,12 +373,21 @@ always @(posedge clkcpu) begin : label2
 	reg sector_not_found;
 	reg irq_at_index;
 	reg [1:0] data_transfer_state;
+	reg       sd_io_idle;
+	reg       sd_done_tgl_cD;
 
 	sector_inc_strobe <= 1'b0;
 	track_inc_strobe <= 1'b0;
 	track_dec_strobe <= 1'b0;
 	track_clear_strobe <= 1'b0;
 	irq_set <= 1'b0;
+
+	// MEGA65 (D81 enable): sd_io_idle is the CDC-safe replacement for the old
+	// `sd_state == SD_IDLE` gate (sd_state now lives in clk_sys, label3). It is cleared
+	// in the very cycle/branch that issues an SD request (race-free) and set again here
+	// when the clk_sys SD FSM toggles sd_done_tgl (synced to clkcpu as sd_done_tgl_c).
+	sd_done_tgl_cD <= sd_done_tgl_c;
+	if (sd_done_tgl_c ^ sd_done_tgl_cD) sd_io_idle <= 1'b1;
 
 	if(!floppy_reset) begin
 		motor_on <= 1'b0;
@@ -382,6 +396,7 @@ always @(posedge clkcpu) begin : label2
 		step_out <= 1'b0;
 		sd_card_read <= 0;
 		sd_card_write <= 0;
+		sd_io_idle <= 1'b1;
 		data_transfer_start <= 1'b0;
 		seek_state <= 0;
 		notready_wait <= 1'b0;
@@ -554,12 +569,13 @@ always @(posedge clkcpu) begin : label2
 							// wait 5 rotations (1 sec) before setting RNF
 							sector_not_found <= 1'b1;
 							delay_cnt <= 24'd1000 * CLK_EN;
-						end else if (sd_state == SD_IDLE) begin
+						end else if (sd_io_idle) begin
 							case (data_transfer_state)
 
 							2'b00: if (fifo_cpuptr == 0) begin
 								// SD Card phase
 								sd_card_read <= 1;
+								sd_io_idle <= 1'b0;   // MEGA65: mark SD busy in the same cycle (race-free)
 								data_transfer_state <= 2'b01;
 							end
 
@@ -592,11 +608,14 @@ always @(posedge clkcpu) begin : label2
 							// wait 5 rotations (1 sec) before setting RNF
 							sector_not_found <= 1'b1;
 							delay_cnt <= 24'd1000 * CLK_EN;
-						end else if (sd_state == SD_IDLE) begin
+						end else if (sd_io_idle) begin
 							case (data_transfer_state)
 							2'b00: begin
 								// pre-read phase
-									if (SECTOR_SIZE_CODE < 2) sd_card_read <= 1;
+									if (SECTOR_SIZE_CODE < 2) begin
+										sd_card_read <= 1;
+										sd_io_idle <= 1'b0;   // MEGA65: race-free SD-busy (size<2 pre-read only)
+									end
 									data_transfer_state <= 2'b10;
 								end
 							2'b10: begin
@@ -604,6 +623,7 @@ always @(posedge clkcpu) begin : label2
 								if (fifo_cpuptr == 0 && fd_ready && fd_sector_hdr && (fd_sector == sector)) data_transfer_start <= 1'b1;
 								if (data_transfer_done) begin
 									sd_card_write <= 1;
+									sd_io_idle <= 1'b0;   // MEGA65: mark SD busy in the same cycle (race-free)
 									data_transfer_state <= 2'b11;
 								end
 							end
@@ -712,15 +732,21 @@ always @(*) begin
 		fifo_cpuptr_adj = fifo_cpuptr[9:0];
 end
 
+// MEGA65 (D81 enable): dual-CLOCK FIFO. Port A (SD/io side) is clocked by clk_sys (the
+// QNICE/vdrives domain): address_a=fifo_sdptr={1'b0,sd_buff_addr} (no core term for the
+// 1581's SECTOR_SIZE_CODE==2), data_a=sd_dout, wren_a=sd_dout_strobe&sd_ack, q_a=sd_din --
+// all vdrives-domain. Port B (drive/cpu side) stays on clkcpu. The dual-port RAM performs
+// the data-path CDC; the SD FSM (label3) is on clk_sys so the whole SD interface matches
+// vdrives. (Was single-clock on clkcpu -> would have meta-stabled the QNICE-domain inputs.)
 fdc1772_dpram #(8, 10) fifo
 (
-	.clock(clkcpu),
-
+	.clock_a(clk_sys),
 	.address_a(fifo_sdptr),
 	.data_a(sd_dout),
 	.wren_a(sd_dout_strobe & sd_ack),
 	.q_a(sd_din),
 
+	.clock_b(clkcpu),
 	.address_b(fifo_cpuptr_adj),
 	.data_b(data_in),
 	.wren_b(data_in_strobe),
@@ -728,60 +754,106 @@ fdc1772_dpram #(8, 10) fifo
 );
 
 // ------------------ SD card control ------------------------
+//
+// MEGA65 (D81 enable, sy2002): the entire SD-request FSM (label3) is re-clocked onto
+// clk_sys (the QNICE/vdrives domain), mirroring sy2002's c1541_track rework. As a result
+// sd_rd, sd_wr, sd_lba, sd_ack and sd_buff_* all live in the SAME clock domain as
+// vdrives.vhd, so vdrives needs no synchronizers and no changes. The clkcpu command FSM
+// (label2) hands off to this clk_sys FSM via:
+//   - request:    label2's 1-cycle sd_card_read/sd_card_write pulses become stable level
+//                 toggles (sd_rd_req_tgl/sd_wr_req_tgl), pulse-synchronized into clk_sys.
+//   - completion: sd_done_tgl is toggled here when a transfer finishes and synchronized
+//                 back to clkcpu (sd_done_tgl_c), where it releases label2's sd_io_idle gate.
+//   - sd_lba:     latched here (clk_sys) from the stable combinational sd_lba_comb.
+// A reset clause (clk_sys-synced floppy_reset) clears a stale sd_rd/sd_wr after an unmount
+// mid-transfer -- the upstream FSM had no reset term, leaving a zombie sd_rd asserted.
 localparam SD_IDLE = 0;
 localparam SD_READ = 1;
 localparam SD_WRITE = 2;
 
-reg [1:0] sd_state;
+reg [1:0] sd_state = SD_IDLE;
 reg       sd_card_write;
 reg       sd_card_read;
 
-always @(posedge clkcpu) begin : label3
-	reg sd_ackD;
-	reg sd_card_readD;
-	reg sd_card_writeD;
-
-	sd_card_readD <= sd_card_read;
+// clkcpu: turn label2's 1-cycle request pulses into stable level toggles, so they can be
+// pulse-synchronized into clk_sys (a plain level-sync would race the short pulse).
+reg sd_rd_req_tgl = 1'b0;
+reg sd_wr_req_tgl = 1'b0;
+always @(posedge clkcpu) begin : label_sdreq
+	reg sd_card_readD, sd_card_writeD;
+	sd_card_readD  <= sd_card_read;
 	sd_card_writeD <= sd_card_write;
-	sd_ackD <= sd_ack;
+	if (~sd_card_readD  & sd_card_read)  sd_rd_req_tgl <= ~sd_rd_req_tgl;
+	if (~sd_card_writeD & sd_card_write) sd_wr_req_tgl <= ~sd_wr_req_tgl;
+end
+
+// request toggles + reset synchronized INTO clk_sys; done toggle synchronized BACK to clkcpu
+wire sd_rd_req_s, sd_wr_req_s, floppy_reset_s;
+reg  sd_done_tgl = 1'b0;
+wire sd_done_tgl_c;
+iecdrv_sync sd_rdreq_sync (clk_sys, sd_rd_req_tgl, sd_rd_req_s);
+iecdrv_sync sd_wrreq_sync (clk_sys, sd_wr_req_tgl, sd_wr_req_s);
+iecdrv_sync sd_frst_sync  (clk_sys, floppy_reset,  floppy_reset_s);
+iecdrv_sync sd_done_sync  (clkcpu,  sd_done_tgl,   sd_done_tgl_c);
+
+always @(posedge clk_sys) begin : label3
+	reg sd_ackD;
+	reg sd_rd_req_sD, sd_wr_req_sD;
+
+	sd_ackD      <= sd_ack;
+	sd_rd_req_sD <= sd_rd_req_s;
+	sd_wr_req_sD <= sd_wr_req_s;
 	if (sd_ack) {sd_rd, sd_wr} <= 0;
 
 	case (sd_state)
 	SD_IDLE:
 	begin
 		s_odd <= 1'b0;
-		if (~sd_card_readD & sd_card_read) begin
+		if (sd_rd_req_s ^ sd_rd_req_sD) begin
 			sd_rd[fdn] <= 1;
-			sd_state <= SD_READ;
+			sd_lba     <= sd_lba_comb;
+			sd_state   <= SD_READ;
 		end
-		else if (~sd_card_writeD & sd_card_write) begin
+		else if (sd_wr_req_s ^ sd_wr_req_sD) begin
 			sd_wr[fdn] <= 1;
-			sd_state <= SD_WRITE;
+			sd_lba     <= sd_lba_comb;
+			sd_state   <= SD_WRITE;
 		end
 	end
 
 	SD_READ:
 	if (sd_ackD & ~sd_ack) begin
 		if (s_odd || SECTOR_SIZE_CODE != 3) begin
-			sd_state <= SD_IDLE;
+			sd_state    <= SD_IDLE;
+			sd_done_tgl <= ~sd_done_tgl;
 		end else begin
-			s_odd <= 1;
+			s_odd      <= 1;
 			sd_rd[fdn] <= 1;
+			sd_lba     <= sd_lba_comb;   // re-sample for the odd half-sector (size code 3)
 		end
 	end
 
 	SD_WRITE:
 	if (sd_ackD & ~sd_ack) begin
 		if (s_odd || SECTOR_SIZE_CODE != 3) begin
-			sd_state <= SD_IDLE;
+			sd_state    <= SD_IDLE;
+			sd_done_tgl <= ~sd_done_tgl;
 		end else begin
-			s_odd <= 1;
+			s_odd      <= 1;
 			sd_wr[fdn] <= 1;
+			sd_lba     <= sd_lba_comb;
 		end
 	end
 
 	default: ;
 	endcase
+
+	if (!floppy_reset_s) begin
+		sd_rd    <= 0;
+		sd_wr    <= 0;
+		sd_state <= SD_IDLE;
+		s_odd    <= 1'b0;
+	end
 end
 
 // -------------------- CPU data read/write -----------------------
@@ -1026,15 +1098,18 @@ end
 
 endmodule
 
+// MEGA65 (D81 enable): true DUAL-CLOCK dual-port RAM (was a single `clock`). Port A is
+// the SD/io side on clk_sys (QNICE-vdrives domain); port B is the drive/cpu side on clkcpu.
+// Standard CDC structure for the WD1772 sector FIFO; Vivado infers a true-dual-port BRAM.
 module fdc1772_dpram #(parameter DATAWIDTH=8, ADDRWIDTH=9)
 (
-	input                   clock,
-
+	input                   clock_a,
 	input   [ADDRWIDTH-1:0] address_a,
 	input   [DATAWIDTH-1:0] data_a,
 	input                   wren_a,
 	output reg [DATAWIDTH-1:0] q_a,
 
+	input                   clock_b,
 	input   [ADDRWIDTH-1:0] address_b,
 	input   [DATAWIDTH-1:0] data_b,
 	input                   wren_b,
@@ -1043,7 +1118,7 @@ module fdc1772_dpram #(parameter DATAWIDTH=8, ADDRWIDTH=9)
 
 reg [DATAWIDTH-1:0] ram[0:(1<<ADDRWIDTH)-1];
 
-always @(posedge clock) begin
+always @(posedge clock_a) begin
 	if(wren_a) begin
 		ram[address_a] <= data_a;
 		q_a <= data_a;
@@ -1052,7 +1127,7 @@ always @(posedge clock) begin
 	end
 end
 
-always @(posedge clock) begin
+always @(posedge clock_b) begin
 	if(wren_b) begin
 		ram[address_b] <= data_b;
 		q_b <= data_b;
