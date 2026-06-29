@@ -245,6 +245,20 @@ wire       fdn_sector_hdr[FD_NUM];
 wire       fdn_sector_data[FD_NUM];
 wire       fdn_dclk[FD_NUM];
 
+reg [WIDX:0] fdn;
+always @(*) begin : label1
+	integer i;
+
+	fdn = 0;
+	for(i = FD_NUM-1; i >= 0; i = i - 1) if(!floppy_drive[i]) fdn = i[WIDX:0];
+end
+
+wire       fd_any = ~&floppy_drive;
+
+reg step_in, step_out;
+reg motor_on /* verilator public */ = 1'b0;
+wire fd_motor = EXT_MOTOR ? floppy_motor : motor_on;
+
 generate
 	genvar i;
 	
@@ -285,16 +299,6 @@ endgenerate
 // ----------------------------- floppy demux ------------------------------
 // -------------------------------------------------------------------------
 
-reg [WIDX:0] fdn;
-always begin : label1
-	integer i;
-	
-	fdn = 0;
-	for(i = FD_NUM-1; i >= 0; i = i - 1) if(!floppy_drive[i]) fdn = i[WIDX:0];
-end
-
-wire       fd_any         = ~&floppy_drive;
-
 wire       fd_index       = fd_any ? fdn_index[fdn]       : 1'b0;
 wire       fd_ready       = fd_any ? fdn_ready[fdn]       : 1'b0;
 wire [6:0] fd_track       = fd_any ? fdn_track[fdn]       : 7'd0;
@@ -325,10 +329,7 @@ localparam MOTOR_IDLE_COUNTER = 4'd10;
 reg [3:0] motor_timeout_index /* verilator public */;
 reg indexD;
 reg busy /* verilator public */;
-reg step_in, step_out;
 reg [3:0] motor_spin_up_sequence /* verilator public */;
-
-wire fd_motor = EXT_MOTOR ? floppy_motor : motor_on;
 
 // consider spin up done either if the motor is not supposed to spin at all or
 // if it's supposed to run and has left the spin up sequence
@@ -980,7 +981,6 @@ reg [7:0] data_in;
 reg [7:0] data_out;
 
 reg step_dir;
-reg motor_on /* verilator public */ = 1'b0;
 reg data_lost;
 
 // ---------------------------- command register -----------------------   
