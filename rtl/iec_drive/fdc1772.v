@@ -36,6 +36,7 @@ module fdc1772 (
 	output           floppy_step,
 	input            floppy_motor,
 	output           floppy_ready,
+	output           fdc_busy,     // MEGA65 (D81 drive LED): expose WD1772 command-busy for the 1581 activity LED
 
 	// interrupts
 	output reg       irq,
@@ -354,6 +355,7 @@ reg [15:0] step_rate_cnt;
 reg [23:0] delay_cnt;
 
 assign floppy_step = step_in | step_out;
+assign fdc_busy    = busy;   // MEGA65 (D81 drive LED): WD1772 command-busy -> 1581 activity LED (clkcpu domain, no CDC)
 
 // flag indicating that a "step" is in progress
 wire step_busy = (step_rate_cnt != 0);

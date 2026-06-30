@@ -115,7 +115,7 @@ iecdrv_mem #(8,13) ram
 wire [7:0] cia_do;
 wire       cia_irq_n;
 
-assign     act_led    =  pa_out[6];
+assign     act_led    =  pa_out[6] | fdc_busy;   // MEGA65 (D81 drive LED): OR in WD1772 busy so turbo loaders that never toggle pa_out[6] still light the LED
 assign     pwr_led    =  pa_out[5];
 wire       motor_n    =  pa_out[2];
 wire       side       =  pa_out[0];
@@ -230,6 +230,7 @@ wire       floppy_step;
 wire [7:0] wd_do;
 
 wire floppy_ready;
+wire fdc_busy;       // MEGA65 (D81 drive LED): WD1772 command-busy from fdc1772, OR-ed into act_led
 
 fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 (
@@ -243,6 +244,7 @@ fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 	.floppy_step(floppy_step),
 	.floppy_motor(~motor_n),
 	.floppy_ready(floppy_ready),
+	.fdc_busy(fdc_busy),
 
 	.cpu_addr(cpu_a[1:0]),
 	.cpu_sel(wd_cs),
