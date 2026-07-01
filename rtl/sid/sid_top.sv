@@ -243,6 +243,12 @@ reg  [17:0] dac_out[N];
 
 wire [17:0] f0;
 wire [17:0] dac_o;
+wire  [7:0] f__st_out;
+wire  [7:0] f_p_t_out;
+wire  [7:0] f_ps__out;
+wire  [7:0] f_pst_out;
+reg  [11:0] f_acc_ps;
+reg  [11:0] f_acc_t;
 
 sid_tables #(USE_8580_TABLES,MULTI_FILTERS) sid_tables
 (
@@ -267,13 +273,6 @@ sid_tables #(USE_8580_TABLES,MULTI_FILTERS) sid_tables
 	.dac_addr(dac_addr),
 	.dac_dout(dac_o)
 );
-
-wire  [7:0] f__st_out;
-wire  [7:0] f_p_t_out;
-wire  [7:0] f_ps__out;
-wire  [7:0] f_pst_out;
-reg  [11:0] f_acc_ps;
-reg  [11:0] f_acc_t;
 
 always @(posedge clk) begin
 	reg [3:0] state;

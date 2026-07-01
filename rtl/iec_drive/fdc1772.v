@@ -722,6 +722,8 @@ reg  [9:0] fifo_cpuptr_adj;
 wire [7:0] fifo_q;
 reg        s_odd; //odd sector
 reg  [9:0] fifo_sdptr;
+reg  [7:0] data_in;
+reg        data_in_strobe;
 
 always @(*) begin
 	if (SECTOR_SIZE_CODE == 3)
@@ -860,7 +862,6 @@ always @(posedge clk_sys) begin : label3
 end
 
 // -------------------- CPU data read/write -----------------------
-reg data_in_strobe;
 reg data_in_valid;
 
 function [15:0] crc;
@@ -979,7 +980,6 @@ wire [7:0] status = { (MODEL == 1 || MODEL == 3) ? !floppy_ready : motor_on,
 
 reg [7:0] track /* verilator public */;
 reg [7:0] sector;
-reg [7:0] data_in;
 reg [7:0] data_out;
 
 reg step_dir;

@@ -61,6 +61,21 @@ localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
 localparam N   = NDR - 1;
 
 reg [N:0] dtype[2];
+wire        c1541_iec_data, c1541_iec_clk, c1541_stb_o;
+wire  [7:0] c1541_par_o;
+wire  [N:0] c1541_led;
+wire  [7:0] c1541_sd_buff_dout[NDR];
+wire [31:0] c1541_sd_lba[NDR];
+wire  [N:0] c1541_sd_rd, c1541_sd_wr;
+wire  [5:0] c1541_sd_blk_cnt[NDR];
+
+wire        c1581_iec_data, c1581_iec_clk, c1581_stb_o;
+wire  [7:0] c1581_par_o;
+wire  [N:0] c1581_led;
+wire  [7:0] c1581_sd_buff_dout[NDR];
+wire [31:0] c1581_sd_lba[NDR];
+wire  [N:0] c1581_sd_rd, c1581_sd_wr;
+
 // MEGA65 (D81 enable, sy2002): re-homed from clk_sys to clk. Upstream MiSTer sources
 // img_mounted/img_size/img_type from hps_io on clk_sys, so latching on posedge clk_sys was
 // same-domain. In the M2M port these three come from vdrives, which resynchronizes them into
@@ -94,14 +109,6 @@ always_comb for(int i=0; i<NDR; i=i+1) begin
 	sd_wr[i]       = (dtype[1][i] ? c1581_sd_wr[i]        : c1541_sd_wr[i]        );
 	sd_blk_cnt[i]  = (dtype[1][i] ? 6'd1                  : c1541_sd_blk_cnt[i]   );
 end
-
-wire        c1541_iec_data, c1541_iec_clk, c1541_stb_o;
-wire  [7:0] c1541_par_o;
-wire  [N:0] c1541_led;
-wire  [7:0] c1541_sd_buff_dout[NDR];
-wire [31:0] c1541_sd_lba[NDR];
-wire  [N:0] c1541_sd_rd, c1541_sd_wr;
-wire  [5:0] c1541_sd_blk_cnt[NDR];
 
 c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 (
@@ -149,12 +156,6 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 );
 
 
-wire        c1581_iec_data, c1581_iec_clk, c1581_stb_o;
-wire  [7:0] c1581_par_o;
-wire  [N:0] c1581_led;
-wire  [7:0] c1581_sd_buff_dout[NDR];
-wire [31:0] c1581_sd_lba[NDR];
-wire  [N:0] c1581_sd_rd, c1581_sd_wr;
 // MEGA65 (D81 enable, sy2002): the 1581 engine is now active. Reset is released only when
 // drive 8 has a D81 mounted (dtype[1]=1); a D64 holds it in reset so only one engine drives
 // the IEC bus at a time (AND-wired, safe by construction -- a reset drive contributes '1').

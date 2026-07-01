@@ -78,6 +78,11 @@ iecdrv_sync #(NDR) rst_sync(clk, reset, reset_drv);
 
 wire stdrom = (DUALROM || PARPORT) ? rom_std_i : 1'b1;
 
+reg  [14:0] mem_a;
+wire [7:0] rom_do;
+wire [7:0] romstd_do;
+wire [7:0] qnice_rom1_do;
+wire [7:0] qnice_rom2_do;
 assign rom_data_o = (DUALROM || PARPORT) ? qnice_rom2_do : qnice_rom1_do;
 
 reg ph2_r;
@@ -132,8 +137,6 @@ xpm_cdc_array_single #(
    .dest_out({empty8k_main, rom16k_main, rom32k_main, rom_sz_main})
 );
 
-wire [7:0] rom_do;
-wire [7:0] qnice_rom2_do;
 generate
 	if(PARPORT) begin
 		iecdrv_mem #(
@@ -176,8 +179,6 @@ generate
 	end
 endgenerate
 
-wire [7:0] romstd_do;
-wire [7:0] qnice_rom1_do;
 iecdrv_mem_rom #(
    .DATAWIDTH(8),
    .ADDRWIDTH(14),
@@ -195,7 +196,6 @@ iecdrv_mem_rom #(
 	.q_b(romstd_do)
 );
 
-reg  [14:0] mem_a;
 wire [14:0] drv_addr[NDR];
 reg   [7:0] drv_data[4];
 always @(posedge clk) begin

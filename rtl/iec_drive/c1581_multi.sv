@@ -92,7 +92,9 @@ always @(posedge clk) begin
 	end
 end
 
+reg  [14:0] mem_a;
 wire [7:0] rom_do;
+wire [7:0] romstd_do;
 wire [7:0] qnice_rom_do;       // MEGA65: readback of the writable (custom DOS) slot -> rom_data_o
 generate
 	if(PARPORT || DUALROM) begin
@@ -127,7 +129,6 @@ generate
 endgenerate
 assign rom_data_o = qnice_rom_do;
 
-wire [7:0] romstd_do;
 iecdrv_mem_rom #(
    .DATAWIDTH(8),
    .ADDRWIDTH(15),
@@ -144,7 +145,6 @@ iecdrv_mem_rom #(
 	.q_b(romstd_do)
 );
 
-reg  [14:0] mem_a;
 wire [14:0] drv_addr[NDR];
 reg   [7:0] drv_data[4];
 always @(posedge clk) begin

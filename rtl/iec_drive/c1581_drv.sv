@@ -56,6 +56,27 @@ module c1581_drv
 	input         sd_buff_wr
 );
 
+wire [23:0] cpu_a;
+wire  [7:0] cpu_do;
+wire        cpu_rw;
+
+wire [7:0] ram_do;
+wire [7:0] cia_do;
+wire       cia_irq_n;
+wire [7:0] via_do;
+wire       via_irq;
+wire [7:0] wd_do;
+
+wire       floppy_step;
+wire       floppy_ready;
+wire       fdc_busy;       // MEGA65 (D81 drive LED): WD1772 command-busy from fdc1772, OR-ed into act_led
+
+wire [7:0] pa_out;
+wire [7:0] pb_out;
+wire       sp_out;
+wire       cnt_out;
+reg        disk_chng_n;
+
 assign rom_addr = cpu_a[14:0];
 
 reg wps_n = 0;
@@ -82,10 +103,6 @@ wire  [7:0] cpu_di =
 	 rom_cs ? rom_data :
 	 8'hFF;
 
-wire [23:0] cpu_a;
-wire  [7:0] cpu_do;
-wire        cpu_rw;
-
 T65 cpu
 (
 	.clk(clk),
@@ -99,7 +116,6 @@ T65 cpu
 	.dout(cpu_do)    //changed to "dout", ditto.
 );
 
-wire [7:0] ram_do;
 iecdrv_mem #(8,13) ram
 (
 	.clock_a(clk),
@@ -112,9 +128,6 @@ iecdrv_mem #(8,13) ram
 	.q_b(ram_do)
 );
 
-wire [7:0] cia_do;
-wire       cia_irq_n;
-
 assign     act_led    =  pa_out[6] | fdc_busy;   // MEGA65 (D81 drive LED): OR in WD1772 busy so turbo loaders that never toggle pa_out[6] still light the LED
 assign     pwr_led    =  pa_out[5];
 wire       motor_n    =  pa_out[2];
@@ -126,12 +139,6 @@ assign     iec_clk_o  = ~pb_out[3];
 assign     iec_data_o = ~pb_out[1] & ~(pb_out[4] & ~iec_atn_i) & (~fast_dir | sp_out);
 assign     iec_fclk_o = ~fast_dir | cnt_out;
 wire [7:0] pb_in      = {~iec_atn_i, wps_n, 3'b111, ~iec_clk_i, 1'b1, ~iec_data_i};
-
-wire [7:0] pa_out;
-wire [7:0] pb_out;
-
-wire       sp_out;
-wire       cnt_out;
 
 iecdrv_mos8520 cia
 (
@@ -165,8 +172,6 @@ iecdrv_mos8520 cia
 );
 
 
-wire [7:0] via_do;
-wire       via_irq;
 wire [7:0] via_pa_o;
 wire [7:0] via_pa_oe;
 wire       via_ca2_o;
@@ -220,17 +225,10 @@ iecdrv_via6522 via
 );
 
 
-reg disk_chng_n;
 always @(posedge clk) begin
 	if(img_mounted | reset) disk_chng_n <=0;
 	if(floppy_step) disk_chng_n <=1;
 end
-
-wire       floppy_step;
-wire [7:0] wd_do;
-
-wire floppy_ready;
-wire fdc_busy;       // MEGA65 (D81 drive LED): WD1772 command-busy from fdc1772, OR-ed into act_led
 
 fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 (

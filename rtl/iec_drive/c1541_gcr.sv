@@ -40,6 +40,21 @@ module c1541_gcr
 	input             sd_buff_wr
 );
 
+reg [12:0] buff_addr;
+wire [7:0] buff_do;
+reg  [7:0] buff_di;
+
+reg  [4:0] sector;
+reg        sync_in_n;
+reg        byte_in;
+reg  [8:0] byte_cnt;
+reg        nibble;
+reg        state;
+reg  [7:0] data_cks;
+reg  [7:0] gcr_byte_out;
+reg  [4:0] gcr_nibble_out;
+reg  [7:0] hdr_cks;
+
 assign sync_n = ~mtr | busy | sync_in_n;
 
 wire [4:0] sector_max=	(track < 18) ? 5'd20 :
@@ -164,21 +179,6 @@ dualport_2clk_ram #(
 	.wren_b(we),
 	.q_b(buff_do)   
 );
-
-reg [12:0] buff_addr;
-wire [7:0] buff_do;
-reg  [7:0] buff_di;
-
-reg  [4:0] sector;
-reg        sync_in_n;
-reg        byte_in;
-reg  [8:0] byte_cnt;
-reg        nibble;
-reg        state;
-reg  [7:0] data_cks; 
-reg  [7:0] gcr_byte_out;
-reg  [4:0] gcr_nibble_out;
-reg  [7:0] hdr_cks;
 
 always @(posedge clk) begin
 	reg       mode_r2;
