@@ -157,6 +157,7 @@ generate
       iecdrv_mem_rom #(
          .DATAWIDTH(8),
          .ADDRWIDTH(14),
+         .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1541_rom.mif.hex"), // MEGA65: stock-DOS fallback so a missing jd-c1541.bin degrades to a working standard 1541 instead of a dead all-00 drive (mirror of the 1581 custom slot in c1581_multi.sv)
          .FALLING_A(1'b1)
       ) rom (
          .clock_a(clk_sys),
