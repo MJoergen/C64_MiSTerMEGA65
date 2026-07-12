@@ -341,12 +341,20 @@ module tb_fdc1772_physical;
 	end
 	endtask
 
+	// MEGA65 (#90 review): model the REAL drive CPU bus cycle. The 1581's T65 keeps
+	// the address (and thus cpu_sel) asserted for a full 2 MHz cycle (~16 clkcpu)
+	// and latches the read data at the CLOSING enable tick -- i.e. at the END of
+	// the access, not one clkcpu after cpu_sel rises. Sampling early masked a real
+	// bug where the physical read path replaced data_out mid-access with the next
+	// buffered FIFO byte. Hold cpu_sel for 16 clkcpu and sample on the last tick.
 	task cpu_read(input [1:0] a, output [7:0] d);
+		integer k;
 	begin
 		@(posedge clkcpu); #1;
 		cpu_sel = 1'b1; cpu_rw = 1'b1; cpu_addr = a;
-		@(posedge clkcpu); #1;
-		d = cpu_dout;
+		for (k = 0; k < 15; k = k + 1) @(posedge clkcpu);
+		#1;
+		d = cpu_dout;          // the T65 captures din at the closing enable tick
 		@(posedge clkcpu); #1;
 		cpu_sel = 1'b0;
 		@(posedge clkcpu); #1;

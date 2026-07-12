@@ -189,6 +189,21 @@ iecdrv_sync #(8) phys_c_sync       (clkcpu, phys_rd_c,         phys_rd_c_c);
 iecdrv_sync      phys_stepack_sync (clkcpu, phys_step_ack_tgl, phys_step_ack_c);
 iecdrv_sync      phys_rddone_sync  (clkcpu, phys_rd_done_tgl,  phys_rd_done_c);
 
+// MEGA65 (#90 review): consume the rd-done toggle two clkcpu AFTER it resolves. The
+// controller writes the result flags/C byte in the SAME 50 MHz cycle it flips the
+// toggle, and every signal crosses through its own independent iecdrv_sync -- whose
+// two-sample agreement filter may resolve each signal one destination cycle apart.
+// Acting on the raw synced toggle could therefore latch stale flags (worst case: a
+// stale rnf=0 for a zero-byte RNF result leaves the finalize condition false forever
+// -- a permanently busy WD). By the time the edge is two cycles old, every flag
+// launched with it is guaranteed stable.
+reg phys_rd_done_c_d1 = 1'b0;
+reg phys_rd_done_c_d2 = 1'b0;
+always @(posedge clkcpu) begin
+	phys_rd_done_c_d1 <= phys_rd_done_c;
+	phys_rd_done_c_d2 <= phys_rd_done_c_d1;
+end
+
 // physical read/step engine state (clkcpu)
 reg         phys_step_busy;         // waiting for a step ack
 reg         phys_rd_pending;        // a read op has been requested, not yet reported done
@@ -205,6 +220,7 @@ reg         phys_rd_done_serviced;  // last serviced rd-done toggle value
 reg         phys_drq_wait;          // a byte is presented; wait for the CPU to take it
 reg         phys_rd_start;          // 1-cycle "reset the byte counter" strobe
 reg         phys_set_sector;        // Read Address: write phys_c_l into sector reg
+reg  [7:0]  phys_step_tally;        // steps issued by the current command (RESTORE bound)
 
 // controller INPUTS that are pure combinational (EXT_MOTOR=1 for the 1581, so
 // fd_motor == floppy_motor). phys_byte_ovf is tied low: fdc1772 only sees the
@@ -375,6 +391,18 @@ reg drq_set;
 reg cpu_rw_data;
 always @(posedge clkcpu)
 	cpu_rw_data <= ~cpu_selD && cpu_sel && cpu_addr == FDC_REG_DATA;
+
+// MEGA65 (#90 review): END of a data-register access. The drive CPU (T65) latches
+// its read data at the CLOSING enable tick of its multi-clkcpu bus cycle, so
+// data_out must stay stable for the WHOLE access -- the physical read path may only
+// pop the next FIFO byte after the access ends. (cpu_rw_data above fires at the
+// START of the access; it is correct for DRQ clearing, but popping on it replaced
+// data_out mid-read whenever the next byte was already buffered, handing the CPU
+// byte k+1 instead of byte k -- deterministic for the 6-byte Read Address reply.)
+reg  cpu_data_selD;
+always @(posedge clkcpu)
+	cpu_data_selD <= cpu_sel && cpu_addr == FDC_REG_DATA;
+wire cpu_data_access_end = cpu_data_selD && !(cpu_sel && cpu_addr == FDC_REG_DATA);
 
 wire drq_clr = !floppy_reset || cpu_rw_data;
 
@@ -572,8 +600,9 @@ always @(posedge clkcpu) begin : label2
 		phys_verify       <= 1'b0;
 		phys_reissue      <= 1'b0;
 		phys_rnf_l <= 1'b0; phys_crc_l <= 1'b0; phys_del_l <= 1'b0;
+		phys_step_tally <= 8'd0;
 		phys_step_ack_serviced <= phys_step_ack_c;
-		phys_rd_done_serviced  <= phys_rd_done_c;
+		phys_rd_done_serviced  <= phys_rd_done_c_d2;
 	end else if (clk8m_en) begin
 		sd_card_read <= 0;
 		sd_card_write <= 0;
@@ -609,6 +638,7 @@ always @(posedge clkcpu) begin : label2
 			phys_verify       <= 1'b0;
 			phys_step_busy    <= 1'b0;
 			phys_reissue      <= 1'b0;
+			phys_step_tally   <= 8'd0;
 
 			if(cmd_type_1 || cmd_type_2 || cmd_type_3) begin
 				RNF <= 1'b0;
@@ -646,8 +676,14 @@ always @(posedge clkcpu) begin : label2
 
 			// ------------------------ TYPE I -------------------------
 			if(cmd_type_1) begin
-				// MEGA65 (#90): "present" and "track0" come from the physical controller
-				if(!(phys_mode ? phys_media_ready_c : fd_present)) begin
+				// MEGA65 (#90): in phys_mode Type-I commands run UNCONDITIONALLY, like
+				// on the real WD1772 (the 177x has no READY input; only the 179x gated
+				// commands on readiness). Gating them on media-ready would deadlock the
+				// whole drive: media-ready requires the disk-change latch to be clear,
+				// the latch is only cleared by a step, and every step arrives as a
+				// Type-I command. The 1581 DOS resolves power-up/change by stepping;
+				// it must always be able to. track0 still comes from the controller.
+				if(!phys_mode && !fd_present) begin
 					// no image/disk selected -> send irq after 6 ms
 					if (!notready_wait) begin
 						delay_cnt <= 16'd6*CLK_EN;
@@ -666,6 +702,14 @@ always @(posedge clkcpu) begin : label2
 						if (phys_mode ? phys_track0_c : fd_track0) begin
 							track_clear_strobe <= 1'b1;
 							seek_state <= 2;
+						end else if (phys_mode && phys_step_tally == 8'd255) begin
+							// MEGA65 (#90 review): real-WD1772 RESTORE bound -- if TR00
+							// never asserts after 255 step pulses (mechanism absent or
+							// track0 sensor broken), terminate with Seek Error + INTRQ
+							// instead of stepping forever with busy stuck high. (The
+							// image path needs no bound: fd_track reaches 0 by construction.)
+							RNF <= 1'b1;
+							seek_state <= 3;
 						end else begin
 							step_dir <= 1'b1;
 							seek_state <= 1;
@@ -706,6 +750,8 @@ always @(posedge clkcpu) begin : label2
 							phys_step_outward <= step_dir;          // 1 = toward track 0
 							phys_step_req_tgl <= ~phys_step_req_tgl;
 							phys_step_busy    <= 1'b1;
+							if (phys_step_tally != 8'd255)
+								phys_step_tally <= phys_step_tally + 8'd1;
 							// update the track register (same U-flag rules as the image path)
 							if( (!cmd[6] && !cmd[5]) || ((cmd[6] || cmd[5]) && cmd[4]))
 								if (step_dir)
@@ -989,9 +1035,12 @@ always @(posedge clkcpu) begin : label2
 				end
 			end
 
-			// controller reported a read op done -> latch its result flags
-			if (phys_rd_done_c != phys_rd_done_serviced) begin
-				phys_rd_done_serviced <= phys_rd_done_c;
+			// controller reported a read op done -> latch its result flags. The
+			// two-cycle-delayed copy of the synced toggle is used so the flags
+			// (synchronized independently) are guaranteed stable -- see the
+			// phys_rd_done_c_d1/_d2 comment at the synchronizers.
+			if (phys_rd_done_c_d2 != phys_rd_done_serviced) begin
+				phys_rd_done_serviced <= phys_rd_done_c_d2;
 				if (phys_rd_pending) begin
 					phys_rnf_l <= phys_rd_rnf_c;
 					phys_crc_l <= phys_rd_crc_err_c;
@@ -1271,14 +1320,27 @@ always @(posedge clkcpu) begin : label4
 	if (phys_rd_start)        phys_bytes <= 11'd0;
 	else if (phys_byte_rd_en) phys_bytes <= phys_bytes + 11'd1;
 
-	if (phys_rd_start)                     phys_drq_wait <= 1'b0;
-	else if (phys_drq_wait && cpu_rw_data) phys_drq_wait <= 1'b0;
+	// phys_drq_wait is released at the END of the data-register access (not at its
+	// start): the T65 latches the byte at its closing enable tick, so the presented
+	// byte must survive the whole access before the next one may be popped.
+	if (phys_rd_start)                              phys_drq_wait <= 1'b0;
+	else if (phys_drq_wait && cpu_data_access_end)  phys_drq_wait <= 1'b0;
 	if (phys_mode && phys_reading && !phys_byte_empty && !phys_drq_wait) begin
 		data_out        <= phys_byte_data;
 		phys_byte_rd_en <= 1'b1;
 		drq_set         <= 1'b1;
 		phys_drq_wait   <= 1'b1;
 	end
+
+	// MEGA65 (#90 review): whenever NO read op is delivering data, pop-and-discard
+	// any bytes still sitting in the external read FIFO -- residue from an aborted
+	// or cancelled operation (Force Interrupt, disk change, core reset while the
+	// 50 MHz controller finished a sector into a stalled FIFO). The controller only
+	// pushes while an operation is in flight (spanned by phys_reading here), so this
+	// can never eat live data; it guarantees that every new operation starts from an
+	// empty FIFO instead of delivering a stale-shifted, CRC-clean-looking stream.
+	if (phys_mode && !phys_reading && !phys_done_latched && !phys_byte_empty)
+		phys_byte_rd_en <= 1'b1;
 
 	if (clk8m_en) data_transfer_done <= 0;
 	data_transfer_startD <= data_transfer_start;

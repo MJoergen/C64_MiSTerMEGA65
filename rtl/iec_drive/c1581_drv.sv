@@ -130,6 +130,18 @@ always @(posedge clk) begin
 	if (~prev_mounted & img_mounted) wps_n <= ~img_readonly;
 end
 
+// MEGA65 (#90): in phys_mode the CIA disk-status senses must reflect the REAL
+// mechanism instead of the image mount state -- without this the 1581 DOS never
+// sees valid media when no image was mounted (PA7 /DSKCHG would be stuck asserted,
+// because only the image path's floppy_step can clear disk_chng_n). The controller
+// levels live in the 50 MHz domain, so 2-FF-sync them into clk here (same
+// discipline as the fdc1772-internal phys_*_sync instances). Both are slow,
+// quasi-static levels. Polarities: phys_change=1 -> medium changed/not proven
+// (PA7 senses low); phys_wprot=1 -> write-protected (PB6 senses low).
+wire phys_change_s, phys_wprot_s;
+iecdrv_sync phys_chg_cia_sync(clk, phys_change, phys_change_s);
+iecdrv_sync phys_wp_cia_sync (clk, phys_wprot,  phys_wprot_s);
+
 //same decoder as on real HW
 wire [2:0] ls193 = cpu_a[15:13];
 wire ram_cs      = ls193 == 0;
@@ -176,13 +188,20 @@ assign     act_led    =  pa_out[6] | fdc_busy;   // MEGA65 (D81 drive LED): OR i
 assign     pwr_led    =  pa_out[5];
 wire       motor_n    =  pa_out[2];
 wire       side       =  pa_out[0];
-wire [7:0] pa_in      = {disk_chng_n, 2'b11, drive_num, 1'b1, ~floppy_ready, 1'b1};
+// MEGA65 (#90): PA7 /DSKCHG comes from the physical controller in phys_mode (its
+// sticky latch mirrors the mechanism: set on power-up/eject/source-switch, cleared
+// by a real step with media present -- exactly what the 1581 DOS expects to clear
+// by stepping). floppy_ready is already phys-aware inside fdc1772.
+wire [7:0] pa_in      = {phys_mode ? ~phys_change_s : disk_chng_n, 2'b11, drive_num, 1'b1, ~floppy_ready, 1'b1};
 
 wire       fast_dir   =  pb_out[5];
 assign     iec_clk_o  = ~pb_out[3];
 assign     iec_data_o = ~pb_out[1] & ~(pb_out[4] & ~iec_atn_i) & (~fast_dir | sp_out);
 assign     iec_fclk_o = ~fast_dir | cnt_out;
-wire [7:0] pb_in      = {~iec_atn_i, wps_n, 3'b111, ~iec_clk_i, 1'b1, ~iec_data_i};
+// MEGA65 (#90): PB6 /WPRT senses the real write-protect tab in phys_mode. Writes
+// are additionally blocked inside fdc1772 (read-only milestone), so this is purely
+// the honest DOS-visible status of the medium.
+wire [7:0] pb_in      = {~iec_atn_i, phys_mode ? ~phys_wprot_s : wps_n, 3'b111, ~iec_clk_i, 1'b1, ~iec_data_i};
 
 iecdrv_mos8520 cia
 (
@@ -269,8 +288,17 @@ iecdrv_via6522 via
 );
 
 
+// MEGA65 (#90): also assert the image-side disk change on ANY source switch
+// (phys_mode edge). Relevant for internal->image with a D81 still mounted: the
+// drive is not reset across the switch, so without this the DOS would keep the
+// cached BAM of the previous medium (a silent media swap). The DOS then clears
+// it the normal way, by stepping (image mode pulses floppy_step again). The
+// image->internal direction is covered by the controller, which re-arms its own
+// change latch whenever it is disabled.
+reg phys_modeD = 0;
 always @(posedge clk) begin
-	if(img_mounted | reset) disk_chng_n <=0;
+	phys_modeD <= phys_mode;
+	if(img_mounted | reset | (phys_modeD ^ phys_mode)) disk_chng_n <=0;
 	if(floppy_step) disk_chng_n <=1;
 end
 
