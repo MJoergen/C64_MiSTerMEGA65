@@ -54,7 +54,50 @@ module c1581_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input   [7:0] rom_data,
 	output  [7:0] rom_data_o,
 	input         rom_wr,
-	input         rom_std
+	input         rom_std,
+
+	// ---------------------------------------------------------------------
+	// MEGA65 physical internal 1581 (issue #90): drive-0 (internal) phys ABI,
+	// threaded from iec_drive down to the drive-0 c1581_drv/fdc1772. Only drive
+	// index 0 has a physical controller; any other generated drive stays virtual
+	// (its fdc phys inputs are tied 0 / outputs left open). phys_mode=0 keeps the
+	// image path byte-identical.
+	// ---------------------------------------------------------------------
+	input         phys_mode,
+
+	output        phys_active,
+	output        phys_cia_motor_on,
+	output        phys_cia_side,
+	output        phys_step_req_tgl,
+	output        phys_step_outward,
+	output        phys_rd_req_tgl,
+	output  [2:0] phys_rd_op,
+	output  [7:0] phys_rd_track,
+	output        phys_rd_side,
+	output  [7:0] phys_rd_sector,
+	output        phys_rd_cancel_tgl,
+	output        phys_byte_ovf,
+	output        phys_byte_rd_en,
+
+	input         phys_step_ack_tgl,
+	input         phys_rd_done_tgl,
+	input   [4:0] phys_rd_result,
+	input         phys_rd_crc_err,
+	input         phys_rd_rnf,
+	input         phys_rd_deleted,
+	input   [7:0] phys_rd_c,
+	input   [7:0] phys_rd_h,
+	input   [7:0] phys_rd_r,
+	input   [7:0] phys_rd_n,
+	input   [7:0] phys_byte_data,
+	input         phys_byte_empty,
+	input         phys_media_ready,
+	input         phys_index,
+	input         phys_track0,
+	input         phys_wprot,
+	input         phys_change,
+	input         phys_motor_on,
+	input         phys_head_settled
 );
 
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
@@ -180,6 +223,30 @@ wire [N:0] act_led_drv, pwr_led_drv;
 assign     act_led = act_led_drv & ~reset_drv;
 assign     pwr_led = pwr_led_drv & ~reset_drv;
 
+// MEGA65 (#90): collect each generated drive's phys outputs; the module-level
+// phys_* bundle exposes only drive 0 (the internal 1581). Drives i>0 route to
+// unused wires (effectively open) and get their phys inputs tied 0 below.
+wire [N:0] phys_active_d, phys_cia_motor_on_d, phys_cia_side_d;
+wire [N:0] phys_step_req_tgl_d, phys_step_outward_d, phys_rd_req_tgl_d;
+wire [N:0] phys_rd_side_d, phys_rd_cancel_tgl_d, phys_byte_ovf_d, phys_byte_rd_en_d;
+wire [2:0] phys_rd_op_d[NDR];
+wire [7:0] phys_rd_track_d[NDR];
+wire [7:0] phys_rd_sector_d[NDR];
+
+assign phys_active        = phys_active_d[0];
+assign phys_cia_motor_on  = phys_cia_motor_on_d[0];
+assign phys_cia_side      = phys_cia_side_d[0];
+assign phys_step_req_tgl  = phys_step_req_tgl_d[0];
+assign phys_step_outward  = phys_step_outward_d[0];
+assign phys_rd_req_tgl    = phys_rd_req_tgl_d[0];
+assign phys_rd_op         = phys_rd_op_d[0];
+assign phys_rd_track      = phys_rd_track_d[0];
+assign phys_rd_side       = phys_rd_side_d[0];
+assign phys_rd_sector     = phys_rd_sector_d[0];
+assign phys_rd_cancel_tgl = phys_rd_cancel_tgl_d[0];
+assign phys_byte_ovf      = phys_byte_ovf_d[0];
+assign phys_byte_rd_en    = phys_byte_rd_en_d[0];
+
 generate
 	genvar i;
 	for(i=0; i<NDR; i=i+1) begin :drives
@@ -226,7 +293,43 @@ generate
 			.sd_buff_addr(sd_buff_addr),
 			.sd_buff_dout(sd_buff_dout),
 			.sd_buff_din(sd_buff_din[i]),
-			.sd_buff_wr(sd_buff_wr)
+			.sd_buff_wr(sd_buff_wr),
+
+			// MEGA65 (#90): physical 1581 ABI. Only drive 0 is the internal drive;
+			// other drives get phys inputs tied off and their outputs left unused.
+			.phys_mode        ( (i==0) ? phys_mode         : 1'b0 ),
+			.phys_active      ( phys_active_d[i]      ),
+			.phys_cia_motor_on( phys_cia_motor_on_d[i]),
+			.phys_cia_side    ( phys_cia_side_d[i]    ),
+			.phys_step_req_tgl( phys_step_req_tgl_d[i]),
+			.phys_step_outward( phys_step_outward_d[i]),
+			.phys_rd_req_tgl  ( phys_rd_req_tgl_d[i]  ),
+			.phys_rd_op       ( phys_rd_op_d[i]       ),
+			.phys_rd_track    ( phys_rd_track_d[i]    ),
+			.phys_rd_side     ( phys_rd_side_d[i]     ),
+			.phys_rd_sector   ( phys_rd_sector_d[i]   ),
+			.phys_rd_cancel_tgl(phys_rd_cancel_tgl_d[i]),
+			.phys_byte_ovf    ( phys_byte_ovf_d[i]    ),
+			.phys_byte_rd_en  ( phys_byte_rd_en_d[i]  ),
+			.phys_step_ack_tgl( (i==0) ? phys_step_ack_tgl : 1'b0 ),
+			.phys_rd_done_tgl ( (i==0) ? phys_rd_done_tgl  : 1'b0 ),
+			.phys_rd_result   ( (i==0) ? phys_rd_result    : 5'd0 ),
+			.phys_rd_crc_err  ( (i==0) ? phys_rd_crc_err   : 1'b0 ),
+			.phys_rd_rnf      ( (i==0) ? phys_rd_rnf       : 1'b0 ),
+			.phys_rd_deleted  ( (i==0) ? phys_rd_deleted   : 1'b0 ),
+			.phys_rd_c        ( (i==0) ? phys_rd_c         : 8'd0 ),
+			.phys_rd_h        ( (i==0) ? phys_rd_h         : 8'd0 ),
+			.phys_rd_r        ( (i==0) ? phys_rd_r         : 8'd0 ),
+			.phys_rd_n        ( (i==0) ? phys_rd_n         : 8'd0 ),
+			.phys_byte_data   ( (i==0) ? phys_byte_data    : 8'd0 ),
+			.phys_byte_empty  ( (i==0) ? phys_byte_empty   : 1'b1 ),
+			.phys_media_ready ( (i==0) ? phys_media_ready  : 1'b0 ),
+			.phys_index       ( (i==0) ? phys_index        : 1'b0 ),
+			.phys_track0      ( (i==0) ? phys_track0       : 1'b0 ),
+			.phys_wprot       ( (i==0) ? phys_wprot        : 1'b0 ),
+			.phys_change      ( (i==0) ? phys_change       : 1'b0 ),
+			.phys_motor_on    ( (i==0) ? phys_motor_on     : 1'b0 ),
+			.phys_head_settled( (i==0) ? phys_head_settled : 1'b0 )
 		);
 	end
 endgenerate

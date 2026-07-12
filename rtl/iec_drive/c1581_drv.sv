@@ -53,7 +53,51 @@ module c1581_drv
 	input   [8:0] sd_buff_addr,
 	input   [7:0] sd_buff_dout,
 	output  [7:0] sd_buff_din,
-	input         sd_buff_wr
+	input         sd_buff_wr,
+
+	// ---------------------------------------------------------------------
+	// MEGA65 physical internal 1581 (issue #90): flat toggle/level ABI, a
+	// 1:1 pass-through of the fdc1772 phys_* boundary up to c1581_multi. The
+	// whole bundle is gated on phys_mode; with phys_mode=0 the fdc1772 physical
+	// logic is inert and the image (sd_*) path is byte-identical.
+	// ---------------------------------------------------------------------
+	input         phys_mode,          // 1 = drive backed by the real internal 1581
+
+	// fdc1772 phys OUTPUTS (up to the VHDL controller)
+	output        phys_active,
+	output        phys_cia_motor_on,
+	output        phys_cia_side,
+	output        phys_step_req_tgl,
+	output        phys_step_outward,
+	output        phys_rd_req_tgl,
+	output  [2:0] phys_rd_op,
+	output  [7:0] phys_rd_track,
+	output        phys_rd_side,
+	output  [7:0] phys_rd_sector,
+	output        phys_rd_cancel_tgl,
+	output        phys_byte_ovf,
+	output        phys_byte_rd_en,   // external read-FIFO pop
+
+	// fdc1772 phys INPUTS (from the VHDL controller)
+	input         phys_step_ack_tgl,
+	input         phys_rd_done_tgl,
+	input   [4:0] phys_rd_result,
+	input         phys_rd_crc_err,
+	input         phys_rd_rnf,
+	input         phys_rd_deleted,
+	input   [7:0] phys_rd_c,
+	input   [7:0] phys_rd_h,
+	input   [7:0] phys_rd_r,
+	input   [7:0] phys_rd_n,
+	input   [7:0] phys_byte_data,    // external read-FIFO head
+	input         phys_byte_empty,   // external read-FIFO empty
+	input         phys_media_ready,
+	input         phys_index,
+	input         phys_track0,
+	input         phys_wprot,
+	input         phys_change,
+	input         phys_motor_on,
+	input         phys_head_settled
 );
 
 wire [23:0] cpu_a;
@@ -261,7 +305,45 @@ fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 	.sd_buff_addr(sd_buff_addr),
 	.sd_dout(sd_buff_dout),
 	.sd_din(sd_buff_din),
-	.sd_dout_strobe(sd_buff_wr)
+	.sd_dout_strobe(sd_buff_wr),
+
+	// MEGA65 (#90): physical internal 1581 ABI, threaded 1:1 up to c1581_multi.
+	// With phys_mode=0 the whole block is inert and the image path is unchanged.
+	.phys_mode(phys_mode),
+
+	.phys_active(phys_active),
+	.phys_cia_motor_on(phys_cia_motor_on),
+	.phys_cia_side(phys_cia_side),
+	.phys_step_req_tgl(phys_step_req_tgl),
+	.phys_step_outward(phys_step_outward),
+	.phys_rd_req_tgl(phys_rd_req_tgl),
+	.phys_rd_op(phys_rd_op),
+	.phys_rd_track(phys_rd_track),
+	.phys_rd_side(phys_rd_side),
+	.phys_rd_sector(phys_rd_sector),
+	.phys_rd_cancel_tgl(phys_rd_cancel_tgl),
+	.phys_byte_ovf(phys_byte_ovf),
+	.phys_byte_rd_en(phys_byte_rd_en),
+
+	.phys_step_ack_tgl(phys_step_ack_tgl),
+	.phys_rd_done_tgl(phys_rd_done_tgl),
+	.phys_rd_result(phys_rd_result),
+	.phys_rd_crc_err(phys_rd_crc_err),
+	.phys_rd_rnf(phys_rd_rnf),
+	.phys_rd_deleted(phys_rd_deleted),
+	.phys_rd_c(phys_rd_c),
+	.phys_rd_h(phys_rd_h),
+	.phys_rd_r(phys_rd_r),
+	.phys_rd_n(phys_rd_n),
+	.phys_byte_data(phys_byte_data),
+	.phys_byte_empty(phys_byte_empty),
+	.phys_media_ready(phys_media_ready),
+	.phys_index(phys_index),
+	.phys_track0(phys_track0),
+	.phys_wprot(phys_wprot),
+	.phys_change(phys_change),
+	.phys_motor_on(phys_motor_on),
+	.phys_head_settled(phys_head_settled)
 );
 
 endmodule

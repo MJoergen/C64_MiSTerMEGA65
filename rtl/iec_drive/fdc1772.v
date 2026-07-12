@@ -24,14 +24,28 @@
 // Discovery by sy2002 in March 2022:
 // Vivado needs interpret this as SystemVerilog even though it is "just" a ".v" file
 
-module fdc1772 (
+// MEGA65 (iverilog/#90): the parameters were originally declared in the module
+// body (after the port list), but the port list uses `W` (= FD_NUM-1). Vivado's
+// SystemVerilog front-end tolerates the forward reference; iverilog -g2012 does
+// not. Moving the parameters (and the derived `W`) into an ANSI #(...) header is
+// a pure declaration-order fix -- no logic change; defaults are byte-identical.
+module fdc1772 #(
+	parameter CLK_EN           = 16'd8000, // in kHz
+	parameter FD_NUM           = 1,    // number of supported floppies (changed by sy2002; should be a generic?)
+	parameter MODEL            = 2,    // 0 - wd1770, 1 - fd1771, 2 - wd1772, 3 = wd1773/fd1793
+	parameter SECTOR_SIZE_CODE = 2'd3, // sec size 0=128, 1=256, 2=512, 3=1024
+	parameter SECTOR_BASE      = 1'b0, // number of first sector on track (archie 0, dos 1)
+	parameter EXT_MOTOR        = 1'b0, // != 0 if motor is controlled externally by floppy_motor
+	parameter INVERT_HEAD_RA   = 1'b0, // != 0 - invert head in READ_ADDRESS reply
+	parameter W                = FD_NUM - 1  // MSB of the per-drive vectors (was a body localparam)
+) (
 	input            clkcpu, // system cpu clock.
 	input            clk_sys, // MEGA65: QNICE clock for the SD/vdrives interface (CDC, sy2002/D81)
 	input            clk8m_en,
 
 	// external set signals
 	input      [W:0] floppy_drive,
-	input            floppy_side, 
+	input            floppy_side,
 	input            floppy_reset,
 	output           floppy_step,
 	input            floppy_motor,
@@ -60,20 +74,155 @@ module fdc1772 (
 	input      [8:0] sd_buff_addr,
 	input      [7:0] sd_dout,
 	output     [7:0] sd_din,
-	input            sd_dout_strobe
+	input            sd_dout_strobe,
+
+	// ---------------------------------------------------------------------
+	// MEGA65 physical internal 1581 (issue #90): flat toggle/level ABI to the
+	// VHDL physical_1581_controller (50 MHz) and its external read FIFO.
+	// Everything below is gated on phys_mode; with phys_mode=0 the block is
+	// inert and the image (floppy.v / sd_*) path above is byte-identical.
+	// ---------------------------------------------------------------------
+	input            phys_mode,         // 1 = drive 8 backed by the real internal 1581
+
+	// controller INPUTS driven BY fdc1772 (raw toggles/levels; controller syncs them)
+	output           phys_active,       // capable + running enable for the controller
+	output           phys_cia_motor_on, // motor-on request (PA2 sense)
+	output           phys_cia_side,     // side select (PA0 sense)
+	output reg       phys_step_req_tgl, // Type-I one-step request (toggle)
+	output reg       phys_step_outward, // 1 = step toward track 0
+	output reg       phys_rd_req_tgl,   // read-op request (toggle)
+	output reg [2:0] phys_rd_op,        // RDOP_READ_SECTOR/READ_ADDRESS/VERIFY
+	output reg [7:0] phys_rd_track,     // WD track register at request time
+	output reg       phys_rd_side,      // current head/side
+	output reg [7:0] phys_rd_sector,    // WD sector register at request time
+	output reg       phys_rd_cancel_tgl,// force-interrupt / cancel (toggle)
+	output           phys_byte_ovf,     // FIFO-overrun back to controller (see note; tied 0)
+
+	// controller OUTPUTS consumed by fdc1772 (synced here into clkcpu)
+	input            phys_step_ack_tgl, // step complete (toggle)
+	input            phys_rd_done_tgl,  // read op complete (toggle)
+	input      [4:0] phys_rd_result,    // RES_* code (informational)
+	input            phys_rd_crc_err,   // data/id CRC error
+	input            phys_rd_rnf,       // record-not-found / not-ready family
+	input            phys_rd_deleted,   // deleted data mark seen
+	input      [7:0] phys_rd_c,         // ID field C/H/R/N (C -> sector reg on Read Address)
+	input      [7:0] phys_rd_h,
+	input      [7:0] phys_rd_r,
+	input      [7:0] phys_rd_n,
+
+	// external read FIFO port (read side is native clkcpu -> no sync needed)
+	output reg       phys_byte_rd_en,   // pop the FIFO head
+	input      [7:0] phys_byte_data,    // FIFO head byte (first-word-fall-through)
+	input            phys_byte_empty,   // FIFO empty
+
+	// live normalized drive state (level; synced into clkcpu below)
+	input            phys_media_ready,
+	input            phys_index,
+	input            phys_track0,
+	input            phys_wprot,
+	input            phys_change,
+	input            phys_motor_on,
+	input            phys_head_settled
 );
 
-parameter CLK_EN           = 16'd8000; // in kHz
-parameter FD_NUM           = 1;    // number of supported floppies (changed by sy2002; should be a generic?)
-parameter MODEL            = 2;    // 0 - wd1770, 1 - fd1771, 2 - wd1772, 3 = wd1773/fd1793
-parameter SECTOR_SIZE_CODE = 2'd3; // sec size 0=128, 1=256, 2=512, 3=1024
-parameter SECTOR_BASE      = 1'b0; // number of first sector on track (archie 0, dos 1)
-parameter EXT_MOTOR        = 1'b0; // != 0 if motor is controlled externally by floppy_motor
-parameter INVERT_HEAD_RA   = 1'b0; // != 0 - invert head in READ_ADDRESS reply
-
 localparam SECTOR_SIZE = 11'd128 << SECTOR_SIZE_CODE;
-localparam W    = FD_NUM - 1;
 localparam WIDX = $clog2(FD_NUM);
+
+// -------------------------------------------------------------------------
+// MEGA65 (iverilog/#90): forward declarations. The signals below are read in
+// continuous assigns / always @(*) / wire initializers that appear textually
+// before their original declaration. Vivado accepts that; iverilog -g2012 does
+// not ("declared after use"). Declaring them here and turning the original
+// `wire x = expr` sites into plain `assign` (or dropping the duplicate `reg`)
+// is a pure reorder -- no logic change.
+// -------------------------------------------------------------------------
+localparam FDC_REG_CMDSTATUS = 0;
+localparam FDC_REG_TRACK     = 1;
+localparam FDC_REG_SECTOR    = 2;
+localparam FDC_REG_DATA      = 3;
+
+reg  [7:0]  track /* verilator public */;
+reg  [7:0]  sector;
+reg  [7:0]  data_out;
+reg         step_dir;
+reg         data_lost;
+reg  [7:0]  cmd /* verilator public */;
+reg         cmd_rx /* verilator public */;
+wire        cmd_type_1;
+wire        cmd_type_2;
+wire        cmd_type_3;
+wire        cmd_type_4;
+reg         s_odd;      // odd sector
+reg  [10:0] fifo_cpuptr;
+wire        fd_doubleside;
+wire [4:0]  fd_spt;
+reg         data_transfer_start;
+reg         data_transfer_done;
+reg         sd_card_write;
+reg         sd_card_read;
+wire        sd_done_tgl_c;
+
+// -------------------------------------------------------------------------
+// MEGA65 physical 1581 (#90): CDC + state
+// -------------------------------------------------------------------------
+// live level state 2-FF/iecdrv_sync'd into clkcpu
+wire       phys_media_ready_c, phys_index_c, phys_track0_c, phys_wprot_c;
+wire       phys_change_c, phys_motor_on_c, phys_head_settled_c;
+wire [4:0] phys_rd_result_c;
+wire       phys_rd_crc_err_c, phys_rd_rnf_c, phys_rd_deleted_c;
+wire [7:0] phys_rd_c_c;
+// inbound toggles synced into clkcpu (edge-detected against *_serviced below)
+wire       phys_step_ack_c, phys_rd_done_c;
+
+iecdrv_sync      phys_mrdy_sync    (clkcpu, phys_media_ready,  phys_media_ready_c);
+iecdrv_sync      phys_index_sync   (clkcpu, phys_index,        phys_index_c);
+iecdrv_sync      phys_trk0_sync    (clkcpu, phys_track0,       phys_track0_c);
+iecdrv_sync      phys_wp_sync      (clkcpu, phys_wprot,        phys_wprot_c);
+iecdrv_sync      phys_chg_sync     (clkcpu, phys_change,       phys_change_c);
+iecdrv_sync      phys_mot_sync     (clkcpu, phys_motor_on,     phys_motor_on_c);
+iecdrv_sync      phys_hs_sync      (clkcpu, phys_head_settled, phys_head_settled_c);
+iecdrv_sync #(5) phys_res_sync     (clkcpu, phys_rd_result,    phys_rd_result_c);
+iecdrv_sync      phys_crc_sync     (clkcpu, phys_rd_crc_err,   phys_rd_crc_err_c);
+iecdrv_sync      phys_rnf_sync     (clkcpu, phys_rd_rnf,       phys_rd_rnf_c);
+iecdrv_sync      phys_del_sync     (clkcpu, phys_rd_deleted,   phys_rd_deleted_c);
+iecdrv_sync #(8) phys_c_sync       (clkcpu, phys_rd_c,         phys_rd_c_c);
+iecdrv_sync      phys_stepack_sync (clkcpu, phys_step_ack_tgl, phys_step_ack_c);
+iecdrv_sync      phys_rddone_sync  (clkcpu, phys_rd_done_tgl,  phys_rd_done_c);
+
+// physical read/step engine state (clkcpu)
+reg         phys_step_busy;         // waiting for a step ack
+reg         phys_rd_pending;        // a read op has been requested, not yet reported done
+reg         phys_reading;           // enable byte pace (drain the FIFO)
+reg         phys_done_latched;      // controller reported done; awaiting full drain
+reg         phys_verify;            // the in-flight read op is a Type-I verify
+reg         phys_reissue;           // deferred re-issue for a multiple-sector read
+reg  [10:0] phys_bytes = 0;         // bytes popped from the FIFO this op
+reg  [10:0] phys_expected;          // bytes expected (SECTOR_SIZE / 6 / 0)
+reg         phys_rnf_l, phys_crc_l, phys_del_l;   // latched result flags
+reg  [7:0]  phys_c_l;               // latched ID C (Read Address -> sector reg)
+reg         phys_step_ack_serviced; // last serviced step-ack toggle value
+reg         phys_rd_done_serviced;  // last serviced rd-done toggle value
+reg         phys_drq_wait;          // a byte is presented; wait for the CPU to take it
+reg         phys_rd_start;          // 1-cycle "reset the byte counter" strobe
+reg         phys_set_sector;        // Read Address: write phys_c_l into sector reg
+
+// controller INPUTS that are pure combinational (EXT_MOTOR=1 for the 1581, so
+// fd_motor == floppy_motor). phys_byte_ovf is tied low: fdc1772 only sees the
+// FIFO read side, so it cannot detect a write-side overrun -- the real
+// rdfifo full flag is wired to the controller at the top level, not through here.
+assign phys_active       = phys_mode & floppy_reset;
+assign phys_cia_motor_on = floppy_motor;
+assign phys_cia_side     = floppy_side;
+assign phys_byte_ovf     = 1'b0;
+
+// MEGA65 (#90): the request toggles are NOT reset on floppy_reset (that would
+// inject a phantom edge into the controller); give them a defined power-up value
+// so the very first `~tgl` is a real edge (FPGA config value; matches HW).
+initial begin
+	phys_step_req_tgl  = 1'b0;
+	phys_rd_req_tgl    = 1'b0;
+	phys_rd_cancel_tgl = 1'b0;
+end
 
 // -------------------------------------------------------------------------
 // --------------------- IO controller image handling ----------------------
@@ -310,10 +459,11 @@ wire       fd_dclk_en     = fd_any ? fdn_dclk[fdn]        : 1'b0;
 wire       fd_present     = fd_any ? fdn_present[fdn]     : 1'b0;
 wire       fd_writeprot   = fd_any ? img_wp[fdn]          : 1'b1;
 
-wire       fd_doubleside  = fdn_doubleside[fdn];
-wire [4:0] fd_spt         = fdn_spt[fdn];
+assign     fd_doubleside  = fdn_doubleside[fdn];   // MEGA65 (#90): forward-declared above
+assign     fd_spt         = fdn_spt[fdn];          // MEGA65 (#90): forward-declared above
 
-assign floppy_ready = fd_ready && fd_present;
+// MEGA65 (#90): in phys_mode PA1 ready sense comes from the physical controller.
+assign floppy_ready = phys_mode ? phys_media_ready_c : (fd_ready && fd_present);
 
 // -------------------------------------------------------------------------
 // ----------------------- internal state machines -------------------------
@@ -385,6 +535,10 @@ always @(posedge clkcpu) begin : label2
 	track_clear_strobe <= 1'b0;
 	irq_set <= 1'b0;
 
+	// MEGA65 (#90): 1-cycle physical-mode strobes
+	phys_set_sector <= 1'b0;
+	phys_rd_start   <= 1'b0;
+
 	// MEGA65 (D81 enable): sd_io_idle is the CDC-safe replacement for the old
 	// `sd_state == SD_IDLE` gate (sd_state now lives in clk_sys, label3). It is cleared
 	// in the very cycle/branch that issues an SD request (race-free) and set again here
@@ -407,6 +561,19 @@ always @(posedge clkcpu) begin : label2
 		irq_at_index <= 1'b0;
 		data_transfer_state <= 2'b00;
 		RNF <= 1'b0;
+
+		// MEGA65 (#90): physical engine reset (toggle OUTPUTS are left untouched to
+		// avoid a phantom edge; the *_serviced trackers are re-armed to the current
+		// synced value so no stale ack/done is seen after reset).
+		phys_step_busy    <= 1'b0;
+		phys_rd_pending   <= 1'b0;
+		phys_reading      <= 1'b0;
+		phys_done_latched <= 1'b0;
+		phys_verify       <= 1'b0;
+		phys_reissue      <= 1'b0;
+		phys_rnf_l <= 1'b0; phys_crc_l <= 1'b0; phys_del_l <= 1'b0;
+		phys_step_ack_serviced <= phys_step_ack_c;
+		phys_rd_done_serviced  <= phys_rd_done_c;
 	end else if (clk8m_en) begin
 		sd_card_read <= 0;
 		sd_card_write <= 0;
@@ -435,6 +602,14 @@ always @(posedge clkcpu) begin : label2
 			sector_not_found <= 1'b0;
 			data_transfer_state <= 2'b00;
 
+			// MEGA65 (#90): start every command from a clean physical-engine state
+			phys_rd_pending   <= 1'b0;
+			phys_reading      <= 1'b0;
+			phys_done_latched <= 1'b0;
+			phys_verify       <= 1'b0;
+			phys_step_busy    <= 1'b0;
+			phys_reissue      <= 1'b0;
+
 			if(cmd_type_1 || cmd_type_2 || cmd_type_3) begin
 				RNF <= 1'b0;
 				motor_on <= 1'b1;
@@ -449,17 +624,31 @@ always @(posedge clkcpu) begin : label2
 				if(cmd[3:2] == 2'b01) irq_at_index <= 1'b1;
 				// From Hatari: Starting a Force Int command when idle should set the motor bit and clear the spinup bit (verified on STF)
 				if (!busy) motor_on <= 1'b1;
+
+				// MEGA65 (#90): abort any in-flight physical operation
+				if (phys_mode) begin
+					phys_rd_cancel_tgl <= ~phys_rd_cancel_tgl;
+					phys_rd_pending    <= 1'b0;
+					phys_reading       <= 1'b0;
+					phys_done_latched  <= 1'b0;
+					phys_verify        <= 1'b0;
+					phys_step_busy     <= 1'b0;
+					phys_reissue       <= 1'b0;
+				end
 			end
 		end
 
 		// execute command if motor is not supposed to be running or
 		// wait for motor spinup to finish
-		if(busy && motor_spin_up_done && !step_busy && !delaying) begin
+		// MEGA65 (#90): in phys_mode the controller owns spin-up/readiness (and the
+		// image-mode index pulses do not exist), so do not gate on motor_spin_up_done.
+		if(busy && (phys_mode ? 1'b1 : motor_spin_up_done) && !step_busy && !delaying) begin
 
 			// ------------------------ TYPE I -------------------------
 			if(cmd_type_1) begin
-				if(!fd_present) begin
-					// no image selected -> send irq after 6 ms
+				// MEGA65 (#90): "present" and "track0" come from the physical controller
+				if(!(phys_mode ? phys_media_ready_c : fd_present)) begin
+					// no image/disk selected -> send irq after 6 ms
 					if (!notready_wait) begin
 						delay_cnt <= 16'd6*CLK_EN;
 						notready_wait <= 1'b1;
@@ -474,7 +663,7 @@ always @(posedge clkcpu) begin : label2
 				0: begin
 					// restore
 					if(cmd[7:4] == 4'b0000) begin
-						if (fd_track0) begin
+						if (phys_mode ? phys_track0_c : fd_track0) begin
 							track_clear_strobe <= 1'b1;
 							seek_state <= 2;
 						end else begin
@@ -510,30 +699,65 @@ always @(posedge clkcpu) begin : label2
 
 				// do the step
 				1: begin
-					if (step_dir)
-						step_in <= 1'b1;
-					else
-						step_out <= 1'b1;
-
-					// update the track register if seek/restore or the update flag set
-					if( (!cmd[6] && !cmd[5]) || ((cmd[6] || cmd[5]) && cmd[4]))
+					if (phys_mode) begin
+						// MEGA65 (#90): one acknowledged physical STEP. Do not advance the
+						// seek FSM here -- the synced step-ack (central block) does that.
+						if (!phys_step_busy) begin
+							phys_step_outward <= step_dir;          // 1 = toward track 0
+							phys_step_req_tgl <= ~phys_step_req_tgl;
+							phys_step_busy    <= 1'b1;
+							// update the track register (same U-flag rules as the image path)
+							if( (!cmd[6] && !cmd[5]) || ((cmd[6] || cmd[5]) && cmd[4]))
+								if (step_dir)
+									track_dec_strobe <= 1'b1;
+								else
+									track_inc_strobe <= 1'b1;
+						end
+					end else begin
 						if (step_dir)
-							track_dec_strobe <= 1'b1;
+							step_in <= 1'b1;
 						else
-							track_inc_strobe <= 1'b1;
+							step_out <= 1'b1;
 
-					step_pulse_cnt <= STEP_PULSE_CLKS - 1'd1;
-					step_rate_cnt <= step_rate_clk;
+						// update the track register if seek/restore or the update flag set
+						if( (!cmd[6] && !cmd[5]) || ((cmd[6] || cmd[5]) && cmd[4]))
+							if (step_dir)
+								track_dec_strobe <= 1'b1;
+							else
+								track_inc_strobe <= 1'b1;
 
-					seek_state <= (!cmd[6] && !cmd[5]) ? 0 : 2; // loop for seek/restore
+						step_pulse_cnt <= STEP_PULSE_CLKS - 1'd1;
+						step_rate_cnt <= step_rate_clk;
+
+						seek_state <= (!cmd[6] && !cmd[5]) ? 0 : 2; // loop for seek/restore
+					end
 				   end
 
 				// verify
 				2: begin
-					if (cmd[2]) begin
-						delay_cnt <= 16'd3*CLK_EN; // TODO: implement verify, now just delay one more step
+					if (phys_mode) begin
+						if (cmd[2]) begin
+							// MEGA65 (#90): after the last step wait for head-settle, then
+							// issue a physical VERIFY read op (completion routes to finish).
+							if (phys_head_settled_c && !phys_rd_pending && !phys_verify) begin
+								phys_rd_op      <= 3'b010;    // RDOP_VERIFY
+								phys_rd_track   <= track;
+								phys_rd_side    <= floppy_side;
+								phys_rd_sector  <= sector;
+								phys_rd_req_tgl <= ~phys_rd_req_tgl;
+								phys_rd_pending <= 1'b1;
+								phys_verify     <= 1'b1;
+								phys_rd_start   <= 1'b1;       // reset byte counter
+								phys_expected   <= 11'd0;      // verify streams no bytes
+							end
+						end else
+							seek_state <= 3;
+					end else begin
+						if (cmd[2]) begin
+							delay_cnt <= 16'd3*CLK_EN; // TODO: implement verify, now just delay one more step
+						end
+						seek_state <= 3;
 					end
-					seek_state <= 3;
 				   end
 
 				// finish
@@ -546,6 +770,40 @@ always @(posedge clkcpu) begin : label2
 			end // if (cmd_type_1)
 
 			// ------------------------ TYPE II -------------------------
+			if(cmd_type_2 && phys_mode) begin
+				// MEGA65 (#90): physical Type-II. Read Sector issues one physical read
+				// op (streamed via the external FIFO, finished on rd_done). Write Sector
+				// is BLOCKED (read-only milestone): the disk is presented write-protected
+				// (status WP bit forced above) and the command completes without touching
+				// media (no sd_card_write, no FIFO).
+				if(!phys_media_ready_c) begin
+					if (!notready_wait) begin
+						delay_cnt <= 16'd6*CLK_EN;
+						notready_wait <= 1'b1;
+					end else begin
+						RNF <= 1'b1;
+						busy <= 1'b0;
+						irq_set <= 1'b1;
+					end
+				end else if (cmd[7:5] == 3'b100) begin
+					// read sector
+					if (!phys_rd_pending && !phys_done_latched && !phys_reissue) begin
+						phys_rd_op      <= 3'b000;    // RDOP_READ_SECTOR
+						phys_rd_track   <= track;
+						phys_rd_side    <= floppy_side;
+						phys_rd_sector  <= sector;
+						phys_rd_req_tgl <= ~phys_rd_req_tgl;
+						phys_rd_pending <= 1'b1;
+						phys_reading    <= 1'b1;
+						phys_rd_start   <= 1'b1;
+						phys_expected   <= SECTOR_SIZE;
+					end
+				end else if (cmd[7:5] == 3'b101) begin
+					// write sector -> blocked; complete write-protected
+					busy    <= 1'b0;
+					irq_set <= 1'b1;
+				end
+			end else
 			if(cmd_type_2) begin
 				if(!fd_present) begin
 					// no image selected -> send irq after 6 ms
@@ -650,11 +908,40 @@ always @(posedge clkcpu) begin : label2
 			end
 
 			// ------------------------ TYPE III -------------------------
+			if(cmd_type_3 && phys_mode) begin
+				// MEGA65 (#90): physical Type-III. Read Address issues a physical
+				// READ_ADDRESS op; the controller streams the 6 reply bytes
+				// (C,H,R,N,CRC-hi,CRC-lo) through the FIFO and, on completion, WD
+				// copies C into the sector register. Read/Write Track are not
+				// physically supported and simply finish (as upstream fakes them).
+				if(!phys_media_ready_c) begin
+					RNF <= 1'b1;
+					busy <= 1'b0;
+					irq_set <= 1'b1;
+				end else if (cmd[7:4] == 4'b1100) begin
+					// read address
+					if (!phys_rd_pending && !phys_done_latched) begin
+						phys_rd_op      <= 3'b001;    // RDOP_READ_ADDRESS
+						phys_rd_track   <= track;
+						phys_rd_side    <= floppy_side;
+						phys_rd_sector  <= sector;
+						phys_rd_req_tgl <= ~phys_rd_req_tgl;
+						phys_rd_pending <= 1'b1;
+						phys_reading    <= 1'b1;
+						phys_rd_start   <= 1'b1;
+						phys_expected   <= 11'd6;
+					end
+				end else begin
+					// read track / write track: not physically supported -> finish
+					busy    <= 1'b0;
+					irq_set <= 1'b1;
+				end
+			end else
 			if(cmd_type_3) begin
 				if(!fd_present) begin
 					// no image selected -> send irq immediately
 					RNF <= 1'b1;
-					busy <= 1'b0; 
+					busy <= 1'b0;
 					irq_set <= 1'b1; // emit irq when command done
 				end else begin
 					// read track TODO: fake
@@ -684,6 +971,76 @@ always @(posedge clkcpu) begin : label2
 			end
 		end
 
+		// ---------------------------------------------------------------------
+		// MEGA65 (#90): physical step-ack + read-completion handshakes. Runs on
+		// clk8m_en, outside the execute gate, so it advances the seek FSM and
+		// finalizes a read even while the WD is otherwise idle-waiting. Toggles
+		// are compared against their *_serviced copy (level compare -> no lost
+		// edge across the 50 MHz -> clkcpu CDC).
+		// ---------------------------------------------------------------------
+		if (phys_mode) begin
+			// one physical STEP acknowledged -> advance the Type-I seek FSM
+			if (phys_step_ack_c != phys_step_ack_serviced) begin
+				phys_step_ack_serviced <= phys_step_ack_c;
+				if (phys_step_busy) begin
+					phys_step_busy <= 1'b0;
+					// loop for seek/restore (cmd[6:5]==00), else go verify/finish
+					seek_state <= (!cmd[6] && !cmd[5]) ? 2'd0 : 2'd2;
+				end
+			end
+
+			// controller reported a read op done -> latch its result flags
+			if (phys_rd_done_c != phys_rd_done_serviced) begin
+				phys_rd_done_serviced <= phys_rd_done_c;
+				if (phys_rd_pending) begin
+					phys_rnf_l <= phys_rd_rnf_c;
+					phys_crc_l <= phys_rd_crc_err_c;
+					phys_del_l <= phys_rd_deleted_c;
+					phys_c_l   <= phys_rd_c_c;
+					phys_rd_pending   <= 1'b0;
+					phys_done_latched <= 1'b1;
+				end
+			end
+
+			// finalize once done AND all expected bytes have been drained (or an
+			// error with no data stream, flagged by RNF)
+			if (phys_done_latched && (phys_bytes >= phys_expected || phys_rnf_l)) begin
+				phys_done_latched <= 1'b0;
+				phys_reading      <= 1'b0;
+				RNF               <= phys_rnf_l;
+				if (phys_verify) begin
+					// Type-I verify: seek error mirrors RNF; finish the command
+					phys_verify <= 1'b0;
+					busy        <= 1'b0;
+					irq_set     <= 1'b1;
+					seek_state  <= 2'd0;
+				end else if (cmd[7:5] == 3'b100 && cmd[4] && !phys_rnf_l && !phys_crc_l) begin
+					// multiple-sector read: advance sector, re-issue next cycle
+					sector_inc_strobe <= 1'b1;
+					phys_reissue      <= 1'b1;
+				end else begin
+					if (cmd[7:4] == 4'b1100)  // Read Address: WD writes C into sector reg
+						phys_set_sector <= 1'b1;
+					busy    <= 1'b0;
+					irq_set <= 1'b1;
+				end
+			end
+
+			// deferred re-issue for a multiple-sector read (sector already incremented)
+			if (phys_reissue) begin
+				phys_reissue    <= 1'b0;
+				phys_rd_op      <= 3'b000;    // RDOP_READ_SECTOR
+				phys_rd_track   <= track;
+				phys_rd_side    <= floppy_side;
+				phys_rd_sector  <= sector;    // incremented by sector_inc_strobe last cycle
+				phys_rd_req_tgl <= ~phys_rd_req_tgl;
+				phys_rd_pending <= 1'b1;
+				phys_reading    <= 1'b1;
+				phys_rd_start   <= 1'b1;
+				phys_expected   <= SECTOR_SIZE;
+			end
+		end
+
 		// stop motor if there was no command for 10 index pulses
 		indexD <= fd_index;
 		if(indexD && !fd_index) begin
@@ -710,17 +1067,15 @@ end
 
 // floppy delivers data at a floppy generated rate (usually 250kbit/s), so the start and stop
 // signals need to be passed forth and back from cpu clock domain to floppy data clock domain
-reg data_transfer_start;
-reg data_transfer_done;
+// MEGA65 (#90): data_transfer_start/done forward-declared above.
 
 // ==================================== FIFO ==================================
 
 // 0.5/1 kB buffer used to receive a sector as fast as possible from from the io
 // controller. The internal transfer afterwards then runs at 250000 Bit/s
-reg  [10:0] fifo_cpuptr;
+// MEGA65 (#90): fifo_cpuptr, s_odd forward-declared above.
 reg  [9:0] fifo_cpuptr_adj;
 wire [7:0] fifo_q;
-reg        s_odd; //odd sector
 reg  [9:0] fifo_sdptr;
 reg  [7:0] data_in;
 reg        data_in_strobe;
@@ -777,8 +1132,7 @@ localparam SD_READ = 1;
 localparam SD_WRITE = 2;
 
 reg [1:0] sd_state = SD_IDLE;
-reg       sd_card_write;
-reg       sd_card_read;
+// MEGA65 (#90): sd_card_write, sd_card_read forward-declared above.
 
 // clkcpu: turn label2's 1-cycle request pulses into stable level toggles, so they can be
 // pulse-synchronized into clk_sys (a plain level-sync would race the short pulse).
@@ -795,7 +1149,7 @@ end
 // request toggles + reset synchronized INTO clk_sys; done toggle synchronized BACK to clkcpu
 wire sd_rd_req_s, sd_wr_req_s, floppy_reset_s;
 reg  sd_done_tgl = 1'b0;
-wire sd_done_tgl_c;
+// MEGA65 (#90): sd_done_tgl_c forward-declared above.
 iecdrv_sync sd_rdreq_sync (clk_sys, sd_rd_req_tgl, sd_rd_req_s);
 iecdrv_sync sd_wrreq_sync (clk_sys, sd_wr_req_tgl, sd_wr_req_s);
 iecdrv_sync sd_frst_sync  (clk_sys, floppy_reset,  floppy_reset_s);
@@ -904,6 +1258,28 @@ always @(posedge clkcpu) begin : label4
 	end
 
 	drq_set <= 1'b0;
+
+	// MEGA65 (#90): physical read -- drain the external read FIFO and hand each
+	// byte to the data register. One byte is presented (DRQ) and phys_drq_wait
+	// blocks the next pop until the CPU takes it: cpu_rw_data (the data-register
+	// read) clears both DRQ and phys_drq_wait, so the next byte is popped exactly
+	// one per CPU read (robust to the drq_set->drq pipeline delay). phys_byte_data/
+	// phys_byte_empty are native clkcpu (FIFO read side) so no sync is needed.
+	// Reuses the same data_out register + drq_set strobe as the image path.
+	// phys_bytes counts delivered bytes for the completion test.
+	phys_byte_rd_en <= 1'b0;
+	if (phys_rd_start)        phys_bytes <= 11'd0;
+	else if (phys_byte_rd_en) phys_bytes <= phys_bytes + 11'd1;
+
+	if (phys_rd_start)                     phys_drq_wait <= 1'b0;
+	else if (phys_drq_wait && cpu_rw_data) phys_drq_wait <= 1'b0;
+	if (phys_mode && phys_reading && !phys_byte_empty && !phys_drq_wait) begin
+		data_out        <= phys_byte_data;
+		phys_byte_rd_en <= 1'b1;
+		drq_set         <= 1'b1;
+		phys_drq_wait   <= 1'b1;
+	end
+
 	if (clk8m_en) data_transfer_done <= 0;
 	data_transfer_startD <= data_transfer_start;
 	// received request to read data
@@ -969,33 +1345,28 @@ always @(posedge clkcpu) begin : label4
 end
 
 // the status byte
-wire [7:0] status = { (MODEL == 1 || MODEL == 3) ? !floppy_ready : motor_on,
-		      (cmd[7:5] == 3'b101 || cmd[7:4] == 4'b1111 || cmd_type_1) && fd_writeprot, // wrprot (only for write!)
-		      cmd_type_1?motor_spin_up_done:1'b0,  // data mark
+// MEGA65 (#90): in phys_mode the mechanical/result bits come from the physical
+// controller (synced levels + latched op flags). With phys_mode=0 every bit is
+// byte-identical to upstream. WD1772 (MODEL==2) b7 = motor. Write commands force
+// the write-protect bit (physical drive is read-only in this milestone).
+wire [7:0] status = { (MODEL == 1 || MODEL == 3) ? !floppy_ready : (phys_mode ? phys_motor_on_c : motor_on),
+		      phys_mode ? ( ((cmd[7:5] == 3'b101) || (cmd[7:4] == 4'b1111)) ? 1'b1
+		                    : (cmd_type_1 ? phys_wprot_c : 1'b0) )
+		                : ((cmd[7:5] == 3'b101 || cmd[7:4] == 4'b1111 || cmd_type_1) && fd_writeprot), // wrprot (only for write!)
+		      cmd_type_1 ? motor_spin_up_done : ((phys_mode && cmd[7:5] == 3'b100) ? phys_del_l : 1'b0), // data mark / deleted
 		      RNF,                                 // seek error/record not found
-		      1'b0,                                // crc error
-		      cmd_type_1?fd_track0:data_lost,      // track0/data lost
-		      cmd_type_1?~fd_index:drq,            // index mark/drq
+		      phys_mode ? phys_crc_l : 1'b0,       // crc error (real in phys_mode)
+		      cmd_type_1 ? (phys_mode ? phys_track0_c : fd_track0) : data_lost, // track0/data lost
+		      cmd_type_1 ? (phys_mode ? ~phys_index_c : ~fd_index) : drq,       // index mark/drq
 		      busy } /* synthesis keep */;
 
-reg [7:0] track /* verilator public */;
-reg [7:0] sector;
-reg [7:0] data_out;
-
-reg step_dir;
-reg data_lost;
-
-// ---------------------------- command register -----------------------   
-reg [7:0] cmd /* verilator public */;
-wire cmd_type_1 = (cmd[7] == 1'b0);
-wire cmd_type_2 = (cmd[7:6] == 2'b10);
-wire cmd_type_3 = (cmd[7:5] == 3'b111) || (cmd[7:4] == 4'b1100);
-wire cmd_type_4 = (cmd[7:4] == 4'b1101);
-
-localparam FDC_REG_CMDSTATUS    = 0;
-localparam FDC_REG_TRACK        = 1;
-localparam FDC_REG_SECTOR       = 2;
-localparam FDC_REG_DATA         = 3;
+// MEGA65 (#90): track, sector, data_out, step_dir, data_lost, cmd, cmd_rx and the
+// FDC_REG_* localparams are forward-declared at the top. cmd_type_* are wires
+// forward-declared there and driven here.
+assign cmd_type_1 = (cmd[7] == 1'b0);
+assign cmd_type_2 = (cmd[7:6] == 2'b10);
+assign cmd_type_3 = (cmd[7:5] == 3'b111) || (cmd[7:4] == 4'b1100);
+assign cmd_type_4 = (cmd[7:4] == 4'b1101);
 
 // CPU register read
 always @(*) begin
@@ -1012,7 +1383,7 @@ always @(*) begin
 end
 
 // cpu register write
-reg cmd_rx /* verilator public */;
+// MEGA65 (#90): cmd_rx forward-declared above.
 reg cmd_rx_i;
 
 always @(posedge clkcpu) begin
@@ -1095,6 +1466,9 @@ always @(posedge clkcpu) begin
 		if (track_inc_strobe) track <= track + 1'd1;
 		if (track_dec_strobe) track <= track - 1'd1;
 		if (track_clear_strobe) track <= 8'd0;
+		// MEGA65 (#90): Read Address writes the returned ID track byte (C) into the
+		// sector register, per the WD1772 datasheet.
+		if (phys_set_sector) sector <= phys_c_l;
 	end
 end
 
