@@ -1056,9 +1056,18 @@ always @(posedge clkcpu) begin : label2
 				end
 			end
 
-			// finalize once done AND all expected bytes have been drained (or an
-			// error with no data stream, flagged by RNF)
-			if (phys_done_latched && (phys_bytes >= phys_expected || phys_rnf_l)) begin
+			// finalize once done AND all expected bytes have been drained AND the
+			// last byte was actually CONSUMED by the drive CPU (phys_drq_wait clears
+			// at the end of its data-register access) -- or an error with no data
+			// stream, flagged by RNF. Dropping busy at mere PRESENTATION of the last
+			// byte loses that byte to the 1581 ROM, whose transfer loops poll BUSY
+			// FIRST and DRQ second ($CD17: AND #$03 / LSR / BCC done): it exits on
+			// busy=0 with the final byte still in the data register. The ROM then
+			// software-CRC-checks the 6-byte Read Address reply ($DA63, CCITT preset
+			// $B230 over C,H,R,N,CRC,CRC -> residue 0) and a truncated reply fails
+			// with error $09 -> instant FILE NOT FOUND (observed on hardware; fix
+			// proven against the real 318045-02 ROM in simulation).
+			if (phys_done_latched && ((phys_bytes >= phys_expected && !phys_drq_wait) || phys_rnf_l)) begin
 				phys_done_latched <= 1'b0;
 				phys_reading      <= 1'b0;
 				RNF               <= phys_rnf_l;

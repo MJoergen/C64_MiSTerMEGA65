@@ -460,6 +460,8 @@ module tb_fdc1772_physical;
 		$display("drained %0d bytes", got);
 
 		wait_busy(1'b0, "read-sector done");
+		repeat (4) @(posedge clkcpu);   // busy now clears on CONSUMPTION of the
+		                                // last byte; give the registered INTRQ its edge
 		expect_eq(irq, 1'b1, "INTRQ asserted after read sector");
 
 		// final status: motor(b7)=1, wp(b6)=0, deleted(b5)=0, RNF(b4)=0,
@@ -477,13 +479,18 @@ module tb_fdc1772_physical;
 		// bytes (C,H,R,N,CRC-hi,CRC-lo) must arrive byte-exact and in order.
 		// The backend queues all 6 instantly, so this exercises exactly the
 		// prebuffered-FIFO case where a too-early pop would shift the stream.
+		// CRITICAL: drain with the REAL 1581 ROM idiom ($CD17) -- poll BUSY
+		// FIRST and exit the loop the moment busy reads 0, take a byte only
+		// while busy=1 AND drq=1. If busy drops when the last byte is merely
+		// PRESENTED (instead of consumed), this loop loses the final byte --
+		// the ROM then fails its software CRC over the reply (error $09).
 		$display("--- READ ADDRESS ---");
 		cpu_write(REG_SECTOR, 8'hEE);          // WD must overwrite this with C
 		cpu_write(REG_CMDSTATUS, 8'hC0);
 		wait_busy(1'b1, "read-address accepted");
 		got   = 0;
 		guard = 0;
-		while (got < 6) begin
+		forever begin
 			@(posedge clkcpu);
 			guard = guard + 1;
 			if (guard > 4_000_000) begin
@@ -491,7 +498,9 @@ module tb_fdc1772_physical;
 				$display("FAIL: timeout draining read-address (got %0d/6)", got);
 				got = 6;
 			end
-			else if (drq === 1'b1) begin
+			cpu_read(REG_CMDSTATUS, status);   // ROM: LDA $6000 / AND #$03 / LSR
+			if (status[0] !== 1'b1) break;     // busy gone -> ROM exits its loop
+			if (status[1] === 1'b1 && got < 6) begin
 				cpu_read(REG_DATA, rbyte);
 				case (got)
 					0: expect_eq(rbyte, 8'h03, "read-address byte0 (C)");
@@ -503,9 +512,16 @@ module tb_fdc1772_physical;
 				endcase
 				got = got + 1;
 			end
+			if (got > 6) begin
+				errors = errors + 1;
+				$display("FAIL: more than 6 read-address bytes offered");
+				got = 6;
+			end
 		end
+		expect_eq(got[7:0], 8'd6, "ROM-style busy-first drain got all 6 bytes");
 		wait_busy(1'b0, "read-address done");
-		expect_eq(irq, 1'b1, "INTRQ asserted after read address");
+		// (INTRQ was already cleared by the status polls of the drain loop,
+		// exactly as in the real ROM flow -- so no INTRQ expectation here.)
 		cpu_read(REG_SECTOR, rbyte);
 		expect_eq(rbyte, 8'h03, "sector register = found C after read address");
 		cpu_read(REG_CMDSTATUS, status);
