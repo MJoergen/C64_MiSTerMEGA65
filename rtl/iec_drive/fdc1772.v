@@ -493,6 +493,11 @@ assign     fd_spt         = fdn_spt[fdn];          // MEGA65 (#90): forward-decl
 // MEGA65 (#90): in phys_mode PA1 ready sense comes from the physical controller.
 assign floppy_ready = phys_mode ? phys_media_ready_c : (fd_ready && fd_present);
 
+// MEGA65 (#90 bring-up): index source for the WD's own index-based housekeeping
+// (motor idle timeout, spin-up countdown, Force-Interrupt-on-index) -- the real
+// mechanism index in phys mode, the image floppy model otherwise.
+wire fd_index_eff = phys_mode ? phys_index_c : fd_index;
+
 // -------------------------------------------------------------------------
 // ----------------------- internal state machines -------------------------
 // -------------------------------------------------------------------------
@@ -1090,9 +1095,13 @@ always @(posedge clkcpu) begin : label2
 			end
 		end
 
-		// stop motor if there was no command for 10 index pulses
-		indexD <= fd_index;
-		if(indexD && !fd_index) begin
+		// stop motor if there was no command for 10 index pulses.
+		// MEGA65 (#90 bring-up): this block also counts down the spin-up sequence
+		// (WD status bit 5 for Type-I) and fires the Force-Interrupt-on-index IRQ.
+		// In phys mode the image floppy model never pulses fd_index, which left
+		// motor_spin_up_done and irq_at_index dead -- use the real (synced) index.
+		indexD <= fd_index_eff;
+		if(indexD && !fd_index_eff) begin
 			irq_at_index <= 1'b0;
 			if (irq_at_index) irq_set <= 1'b1;
 
@@ -1293,8 +1302,17 @@ always @(posedge clkcpu) begin : label4
 	crc_en <= 0;
 	if(crc_en) crcval <= crc(crcval, data_out);
 
+	// MEGA65 (#90 bring-up): mirror the WRITTEN value into the readback register.
+	// This used to be `data_out <= data_in`, but data_in is assigned from cpu_din
+	// in the same clock edge (in the cpu-register-write block), so the readback
+	// was one write behind. The real WD1772 has ONE data register: reading it
+	// back returns what was just written. The 1581 ROM's power-up self test
+	// ($C347: write $FF..$01 to track/sector/data, verify each readback) fails
+	// on the stale value, aborts controller init with error $0D and leaves the
+	// drive permanently misbehaving (observed on hardware: track register stuck
+	// at $FF, no seeks, instant FILE NOT FOUND).
 	if (cpu_we && cpu_addr == FDC_REG_DATA) begin
-		data_out <= data_in;
+		data_out <= cpu_din;
 		data_in_valid <= 1;
 	end
 

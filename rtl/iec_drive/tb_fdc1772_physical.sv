@@ -472,6 +472,47 @@ module tb_fdc1772_physical;
 		expect_eq(status[7], 1'b1, "status motor set");
 		expect_eq(status,    8'h80, "status word after clean read");
 
+		// -------------------- 4) READ ADDRESS (0xC0) --------------------
+		// The 1581 DOS uses Read Address to locate the head, so the 6 reply
+		// bytes (C,H,R,N,CRC-hi,CRC-lo) must arrive byte-exact and in order.
+		// The backend queues all 6 instantly, so this exercises exactly the
+		// prebuffered-FIFO case where a too-early pop would shift the stream.
+		$display("--- READ ADDRESS ---");
+		cpu_write(REG_SECTOR, 8'hEE);          // WD must overwrite this with C
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "read-address accepted");
+		got   = 0;
+		guard = 0;
+		while (got < 6) begin
+			@(posedge clkcpu);
+			guard = guard + 1;
+			if (guard > 4_000_000) begin
+				errors = errors + 1;
+				$display("FAIL: timeout draining read-address (got %0d/6)", got);
+				got = 6;
+			end
+			else if (drq === 1'b1) begin
+				cpu_read(REG_DATA, rbyte);
+				case (got)
+					0: expect_eq(rbyte, 8'h03, "read-address byte0 (C)");
+					1: expect_eq(rbyte, 8'h00, "read-address byte1 (H)");
+					2: expect_eq(rbyte, 8'h01, "read-address byte2 (R)");
+					3: expect_eq(rbyte, 8'h02, "read-address byte3 (N)");
+					4: expect_eq(rbyte, 8'hAA, "read-address byte4 (CRC hi)");
+					5: expect_eq(rbyte, 8'h55, "read-address byte5 (CRC lo)");
+				endcase
+				got = got + 1;
+			end
+		end
+		wait_busy(1'b0, "read-address done");
+		expect_eq(irq, 1'b1, "INTRQ asserted after read address");
+		cpu_read(REG_SECTOR, rbyte);
+		expect_eq(rbyte, 8'h03, "sector register = found C after read address");
+		cpu_read(REG_CMDSTATUS, status);
+		expect_eq(status[0], 1'b0, "ra status busy clear");
+		expect_eq(status[4], 1'b0, "ra status RNF clear");
+		expect_eq(status[1], 1'b0, "ra status DRQ clear");
+
 		// -------------------- verdict --------------------
 		repeat (10) @(posedge clkcpu);
 		if (errors == 0) begin
