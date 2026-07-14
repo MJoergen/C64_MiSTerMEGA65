@@ -21,7 +21,10 @@ module iecdrv_sync #(parameter WIDTH = 1)
 	output reg [WIDTH-1:0] out
 );
 
-reg [WIDTH-1:0] s1,s2;
+// MEGA65 (#90): ASYNC_REG keeps the synchronizer flops adjacent (metastability
+// settling margin) and marks them for Vivado's CDC methodology (TIMING-10).
+// Attribute only -- zero functional change.
+(* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] s1,s2;
 always @(posedge clk) begin
 	s1 <= in;
 	s2 <= s1;

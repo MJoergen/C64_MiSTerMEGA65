@@ -75,12 +75,14 @@ module c1581_drv
 	output        phys_rd_side,
 	output  [7:0] phys_rd_sector,
 	output        phys_rd_cancel_tgl,
+	output  [1:0] phys_rd_seq,       // op sequence tag (quasi-static before rd_req_tgl)
 	output        phys_byte_ovf,
 	output        phys_byte_rd_en,   // external read-FIFO pop
 
 	// fdc1772 phys INPUTS (from the VHDL controller)
 	input         phys_step_ack_tgl,
 	input         phys_rd_done_tgl,
+	input   [1:0] phys_rd_done_seq,  // seq of the op being completed (quasi-static before rd_done_tgl)
 	input   [4:0] phys_rd_result,
 	input         phys_rd_crc_err,
 	input         phys_rd_rnf,
@@ -97,7 +99,16 @@ module c1581_drv
 	input         phys_wprot,
 	input         phys_change,
 	input         phys_motor_on,
-	input         phys_head_settled
+	input         phys_head_settled,
+
+	// fdc1772 diagnostic event toggles + per-op presented-byte count (drive
+	// clock; 2-FF-synced and counted in the QNICE diag device upstream)
+	output        phys_dbg_lost_tgl,
+	output        phys_dbg_drain_tgl,
+	output        phys_dbg_staledone_tgl,
+	output        phys_dbg_busycmd_tgl,
+	output        phys_dbg_fin_tgl,
+	output [10:0] phys_dbg_pres_cnt
 );
 
 wire [23:0] cpu_a;
@@ -350,11 +361,13 @@ fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 	.phys_rd_side(phys_rd_side),
 	.phys_rd_sector(phys_rd_sector),
 	.phys_rd_cancel_tgl(phys_rd_cancel_tgl),
+	.phys_rd_seq(phys_rd_seq),
 	.phys_byte_ovf(phys_byte_ovf),
 	.phys_byte_rd_en(phys_byte_rd_en),
 
 	.phys_step_ack_tgl(phys_step_ack_tgl),
 	.phys_rd_done_tgl(phys_rd_done_tgl),
+	.phys_rd_done_seq(phys_rd_done_seq),
 	.phys_rd_result(phys_rd_result),
 	.phys_rd_crc_err(phys_rd_crc_err),
 	.phys_rd_rnf(phys_rd_rnf),
@@ -371,7 +384,14 @@ fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 	.phys_wprot(phys_wprot),
 	.phys_change(phys_change),
 	.phys_motor_on(phys_motor_on),
-	.phys_head_settled(phys_head_settled)
+	.phys_head_settled(phys_head_settled),
+
+	.phys_dbg_lost_tgl(phys_dbg_lost_tgl),
+	.phys_dbg_drain_tgl(phys_dbg_drain_tgl),
+	.phys_dbg_staledone_tgl(phys_dbg_staledone_tgl),
+	.phys_dbg_busycmd_tgl(phys_dbg_busycmd_tgl),
+	.phys_dbg_fin_tgl(phys_dbg_fin_tgl),
+	.phys_dbg_pres_cnt(phys_dbg_pres_cnt)
 );
 
 endmodule

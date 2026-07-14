@@ -2,20 +2,55 @@
 // tb_fdc1772_physical.sv
 //
 // Self-checking Icarus Verilog (-g2012) testbench for the MEGA65 physical
-// internal 1581 read branch of fdc1772.v (issue #90).
+// internal 1581 read branch of fdc1772.v (issue #90, delivery v2).
 //
 // It instantiates fdc1772 with phys_mode=1 and stands in for the VHDL
 // physical_1581_controller + physical_1581_rdfifo with:
 //   * an empty `floppy` STUB (image-mode mechanics; must be inert here),
 //   * a mock backend on a separate 50 MHz-ish clock (clk_be) that answers the
-//     flat toggle ABI: it acks Type-I steps, and for a Read Sector it streams a
-//     known 512-byte pattern into a real Gray-code async FIFO (a SystemVerilog
-//     port of physical_1581_rdfifo, so the data path genuinely crosses
-//     clk_be -> clkcpu) and then toggles rd_done with RES_OK,
+//     flat toggle ABI with the delivery-v2 discipline: it acks Type-I steps,
+//     samples the request SEQUENCE TAG at acceptance, latches a request that
+//     arrives while it is busy (pending latch, latest edge wins, cleared by
+//     cancel), streams Read Sector / Read Address bytes into a real Gray-code
+//     async FIFO (an SV port of physical_1581_rdfifo, so the data path
+//     genuinely crosses clk_be -> clkcpu) and toggles rd_done with the
+//     accepted op's tag on phys_rd_done_seq -- aborted ops complete with
+//     THEIR OWN tag,
 //   * the real iecdrv_sync (from iecdrv_misc.sv) inside the DUT for the CDC.
 //
-// Scenario: Restore -> Seek(3) -> Read Sector(1). Checks: busy set/clear,
-// DRQ pulses, 512 data-register bytes == the pattern, status bits, INTRQ.
+// Verified delivery-v2 behavior (all with the REAL 1581 ROM's polling idiom,
+// $CD17: poll BUSY FIRST, DRQ second, exit the moment busy reads 0, and with
+// realistic multi-clkcpu CPU access cycles):
+//   (1) register-init readback: the ROM power-up self test pattern ($C343,
+//       $FF..$01 into track/sector/data, verify every readback);
+//   (2) Read Address reply 6 bytes BYTE-EXACT incl. the ROM's software
+//       CCITT-CRC over the 6 bytes ($DA63, preset $B230, residue 0), and a
+//       Read Sector 512 bytes BYTE-EXACT;
+//   (3) stalled CPU mid-sector (> 2 byte-times): completion still occurs
+//       within a disk-time bound, LOST DATA appears in status bit 2, busy
+//       drops, and the NEXT op is byte-exact;
+//   (4) FIFO residue: stray bytes ahead of an op terminate it in bounded
+//       time; idle residue is eaten by the drain (drain-episode diag); the
+//       next op is byte-exact;
+//   (5) a non-Force-Interrupt command write while busy is IGNORED
+//       (phys_dbg_busycmd_tgl toggles; no register side effects);
+//   (6) after Force Interrupt mid-op, the cancelled op's late done is
+//       ignored via the sequence tag (phys_dbg_staledone_tgl toggles) and a
+//       fresh op completes byte-exact;
+//   (7) status NEVER shows the CRC and RNF bits together (continuous
+//       monitor; plus a forced crc+rnf completion from the backend proves
+//       the suppression belt);
+//   (8) busy-tail: after the last DRQ of a read, busy stays set for at
+//       least ~1 byte-time (polled and measured);
+//   (9) round 10 F3: a paced presentation that becomes due while the drive
+//       CPU has an OPEN 16-clkcpu read access to the data register is
+//       DEFERRED until the access closes -- no corrupted byte, no
+//       duplicate, no false LOST DATA (plus a continuous monitor: the data
+//       register never changes during any open CPU read of it);
+//   (10) round 10 F1: a Force Interrupt whose command strobe lands on the
+//       same clk8m tick as a deferred multi-sector reissue produces NO
+//       phantom operation (seq tag unchanged, the controller sees no new
+//       request) and the WD stays fully operational.
 //
 // Run:
 //   iverilog -g2012 -o tb.vvp tb_fdc1772_physical.sv fdc1772.v iecdrv_misc.sv
@@ -115,14 +150,32 @@ module tb_fdc1772_physical;
 	localparam [2:0] RDOP_READ_ADDRESS = 3'b001;
 	localparam [2:0] RDOP_VERIFY       = 3'b010;
 	localparam [4:0] RES_OK            = 5'b00000;
+	localparam [4:0] RES_CANCELLED     = 5'b00111;
 
 	localparam [1:0] REG_CMDSTATUS = 2'd0;
 	localparam [1:0] REG_TRACK     = 2'd1;
 	localparam [1:0] REG_SECTOR    = 2'd2;
 	localparam [1:0] REG_DATA      = 2'd3;
 
+	// one DD MFM byte-time in tb time: PHYS_PACE_TICKS(252) clk8m ticks; the tb
+	// clk8m_en fires every 2nd clkcpu (60 ns) -> 252 * 120 ns = 30240 ns
+	localparam integer BYTE_NS = 252 * 2 * 60;
+
 	// deterministic sector pattern (both producer + checker use this)
 	function [7:0] pat(input [9:0] i); pat = (i * 13 + 5); endfunction
+
+	// CCITT CRC-16 (x^16+x^12+x^5+1, MSB first) -- same algorithm as the
+	// fdc1772-internal function and the 1581 ROM's software check at $DA63
+	function [15:0] crc16(input [15:0] c, input [7:0] val);
+		integer i;
+		reg [15:0] x;
+		begin
+			x = {c[15:8] ^ val, 8'h00};
+			for (i = 0; i < 8; i = i + 1)
+				x = x[15] ? ((x << 1) ^ 16'h1021) : (x << 1);
+			crc16 = {c[7:0] ^ x[15:8], x[7:0]};
+		end
+	endfunction
 
 	integer errors = 0;
 	task expect_eq(input [63:0] got, input [63:0] exp, input [255:0] what);
@@ -164,17 +217,24 @@ module tb_fdc1772_physical;
 	wire [7:0] phys_rd_track, phys_rd_sector;
 	wire       phys_rd_side;
 	wire       phys_rd_cancel_tgl;
+	wire [1:0] phys_rd_seq;
 	wire       phys_byte_ovf;
 	wire       phys_byte_rd_en;
 
 	// phys ABI: backend -> DUT
 	reg        phys_step_ack_tgl = 0;
 	reg        phys_rd_done_tgl = 0;
+	reg  [1:0] phys_rd_done_seq = 0;
 	reg  [4:0] phys_rd_result = RES_OK;
 	reg        phys_rd_crc_err = 0, phys_rd_rnf = 0, phys_rd_deleted = 0;
 	reg  [7:0] phys_rd_c = 0, phys_rd_h = 0, phys_rd_r = 0, phys_rd_n = 0;
 	reg        phys_media_ready = 0, phys_index = 0, phys_track0 = 0;
 	reg        phys_wprot = 0, phys_change = 0, phys_motor_on = 0, phys_head_settled = 0;
+
+	// diagnostics
+	wire        phys_dbg_lost_tgl, phys_dbg_drain_tgl, phys_dbg_staledone_tgl;
+	wire        phys_dbg_busycmd_tgl, phys_dbg_fin_tgl;
+	wire [10:0] phys_dbg_pres_cnt;
 
 	// FIFO nets
 	wire [7:0] fifo_rd_data;
@@ -207,8 +267,10 @@ module tb_fdc1772_physical;
 		.phys_rd_req_tgl(phys_rd_req_tgl), .phys_rd_op(phys_rd_op),
 		.phys_rd_track(phys_rd_track), .phys_rd_side(phys_rd_side),
 		.phys_rd_sector(phys_rd_sector), .phys_rd_cancel_tgl(phys_rd_cancel_tgl),
+		.phys_rd_seq(phys_rd_seq),
 		.phys_byte_ovf(phys_byte_ovf),
 		.phys_step_ack_tgl(phys_step_ack_tgl), .phys_rd_done_tgl(phys_rd_done_tgl),
+		.phys_rd_done_seq(phys_rd_done_seq),
 		.phys_rd_result(phys_rd_result), .phys_rd_crc_err(phys_rd_crc_err),
 		.phys_rd_rnf(phys_rd_rnf), .phys_rd_deleted(phys_rd_deleted),
 		.phys_rd_c(phys_rd_c), .phys_rd_h(phys_rd_h),
@@ -218,7 +280,14 @@ module tb_fdc1772_physical;
 		.phys_media_ready(phys_media_ready), .phys_index(phys_index),
 		.phys_track0(phys_track0), .phys_wprot(phys_wprot),
 		.phys_change(phys_change), .phys_motor_on(phys_motor_on),
-		.phys_head_settled(phys_head_settled)
+		.phys_head_settled(phys_head_settled),
+
+		.phys_dbg_lost_tgl(phys_dbg_lost_tgl),
+		.phys_dbg_drain_tgl(phys_dbg_drain_tgl),
+		.phys_dbg_staledone_tgl(phys_dbg_staledone_tgl),
+		.phys_dbg_busycmd_tgl(phys_dbg_busycmd_tgl),
+		.phys_dbg_fin_tgl(phys_dbg_fin_tgl),
+		.phys_dbg_pres_cnt(phys_dbg_pres_cnt)
 	);
 
 	tb_rdfifo #(.AW(10)) rdfifo (
@@ -229,9 +298,75 @@ module tb_fdc1772_physical;
 	);
 
 	// -----------------------------------------------------------------------
-	// MOCK CONTROLLER BACKEND (clk_be). Syncs the DUT request toggles in, acks
-	// steps, and streams a sector on Read Sector. Models a track-0 sensor via a
-	// head cylinder so Restore terminates realistically.
+	// diagnostic toggle edge counters (all dbg toggles are clkcpu-domain)
+	// -----------------------------------------------------------------------
+	integer cnt_lost = 0, cnt_drain = 0, cnt_stale = 0, cnt_busycmd = 0, cnt_fin = 0;
+	reg d_lost = 0, d_drain = 0, d_stale = 0, d_busycmd = 0, d_fin = 0;
+	always @(posedge clkcpu) begin
+		d_lost    <= phys_dbg_lost_tgl;
+		d_drain   <= phys_dbg_drain_tgl;
+		d_stale   <= phys_dbg_staledone_tgl;
+		d_busycmd <= phys_dbg_busycmd_tgl;
+		d_fin     <= phys_dbg_fin_tgl;
+		if (phys_dbg_lost_tgl    ^ d_lost)    cnt_lost    = cnt_lost + 1;
+		if (phys_dbg_drain_tgl   ^ d_drain)   cnt_drain   = cnt_drain + 1;
+		if (phys_dbg_staledone_tgl ^ d_stale) cnt_stale   = cnt_stale + 1;
+		if (phys_dbg_busycmd_tgl ^ d_busycmd) cnt_busycmd = cnt_busycmd + 1;
+		if (phys_dbg_fin_tgl     ^ d_fin)     cnt_fin     = cnt_fin + 1;
+	end
+
+	// -----------------------------------------------------------------------
+	// (7) continuous invariant: the status register must NEVER show the CRC
+	// (bit 3) and RNF (bit 4) bits together -- the genuine 1581 DOS maps that
+	// combination to job SUCCESS via the $CD5A table hole.
+	// -----------------------------------------------------------------------
+	integer crc_rnf_viol = 0;
+	always @(posedge clkcpu)
+		if (dut.status[3] === 1'b1 && dut.status[4] === 1'b1) begin
+			crc_rnf_viol = crc_rnf_viol + 1;
+			if (crc_rnf_viol < 5)
+				$display("FAIL: status shows CRC and RNF together @%0t", $time);
+		end
+
+	// -----------------------------------------------------------------------
+	// (9) continuous invariant (round 10 F3): the WD data register must NEVER
+	// change while the drive CPU has an OPEN READ access to it -- the T65
+	// latches cpu_dout at the CLOSING enable tick, so a mid-access change
+	// corrupts the byte read. (In this bench data_out only changes through the
+	// phys presentation or a CPU WRITE access, so any hit is a real violation.)
+	// -----------------------------------------------------------------------
+	wire mon_rd_open = cpu_sel && cpu_rw && (cpu_addr == REG_DATA);
+	integer data_mid_rd_viol = 0;
+	reg  [7:0] mon_data_q = 0;
+	reg        mon_open_q = 0;
+	always @(posedge clkcpu) begin
+		if (mon_open_q && (dut.data_out !== mon_data_q)) begin
+			data_mid_rd_viol = data_mid_rd_viol + 1;
+			if (data_mid_rd_viol < 5)
+				$display("FAIL: data register changed during an open CPU read @%0t", $time);
+		end
+		mon_open_q <= mon_rd_open;
+		mon_data_q <= dut.data_out;
+	end
+
+	// -----------------------------------------------------------------------
+	// (10) round 10 F1 instrumentation: count clk8m ticks on which a deferred
+	// multi-sector reissue is pending in the SAME tick a Force Interrupt
+	// command strobe is active (the exact collision the reissue gate must
+	// suppress -- proves the test alignment really happened), and count the
+	// request edges the mock controller actually sees.
+	// -----------------------------------------------------------------------
+	integer fi_reissue_coll = 0;
+	always @(posedge clkcpu)
+		if (clk8m_en && dut.phys_reissue && dut.cmd_rx && dut.cmd_type_4)
+			fi_reissue_coll = fi_reissue_coll + 1;
+
+	// -----------------------------------------------------------------------
+	// MOCK CONTROLLER BACKEND (clk_be). Delivery-v2 discipline: samples the
+	// request tag at acceptance, latches a request that arrives while busy
+	// (cleared by cancel), completes every op -- including cancelled ones --
+	// with a done toggle carrying the ACCEPTED op's tag on phys_rd_done_seq.
+	// Models a track-0 sensor via a head cylinder so Restore terminates.
 	// -----------------------------------------------------------------------
 	wire be_stepreq_s, be_rdreq_s, be_cancel_s;
 	iecdrv_sync be_step_sync (clk_be, phys_step_req_tgl,  be_stepreq_s);
@@ -242,9 +377,39 @@ module tb_fdc1772_physical;
 	integer    head = 3;             // head cylinder; Restore steps to 0
 	reg [3:0]  step_dly = 0;
 	reg        step_busy_be = 0;
-	reg [2:0]  be_state = 0;
+	reg [3:0]  be_state = 0;
+	reg        be_pend = 0;          // request-pending latch (req while busy)
+	reg [1:0]  be_seq = 0;           // request tag sampled at acceptance
+	reg [15:0] be_dly = 0;
+	reg [15:0] be_start_delay = 0;   // stimulus knob: clk_be cycles before serving
+	reg [15:0] be_cancel_delay = 0;  // stimulus knob: clk_be cycles before the cancel done
+	reg        stray_req = 0;        // stimulus: ONE stray byte enters the FIFO at op start
+	reg [3:0]  poison_req = 0;       // stimulus: push N stray bytes while idle (drain food)
+	reg        err_req = 0;          // stimulus: complete next op with crc=1 AND rnf=1, 0 bytes
+	reg        manual_req = 0;       // stimulus: next op parks in a manual state (tb-paced
+	                                 //           pushes via push_req; done on manual_done_req)
+	reg        manual_done_req = 0;  // stimulus: complete the manual op now (clean)
+	reg        push_req = 0;         // stimulus: push ONE byte (push_val) into the FIFO
+	reg  [7:0] push_val = 0;
 	reg [9:0]  be_idx = 0;
 	reg [2:0]  be_op = 0;
+	reg [15:0] be_racrc = 0;
+	reg [7:0]  ra_c = 8'h03, ra_h = 8'h00, ra_r = 8'h01, ra_n = 8'h02;
+
+	// backend done helper values are driven quasi-static BEFORE the done
+	// toggle flips (registered one clk_be earlier than the toggle would be
+	// enough; same-edge is fine through the 2-cycle-delayed consume in the DUT)
+	task be_done(input [1:0] seq, input rnf, input crcerr);
+	begin
+		phys_rd_result   <= (rnf && crcerr) ? RES_CANCELLED : RES_OK;
+		phys_rd_rnf      <= rnf;
+		phys_rd_crc_err  <= crcerr;
+		phys_rd_deleted  <= 1'b0;
+		phys_rd_c <= ra_c; phys_rd_h <= ra_h; phys_rd_r <= ra_r; phys_rd_n <= ra_n;
+		phys_rd_done_seq <= seq;
+		phys_rd_done_tgl <= ~phys_rd_done_tgl;
+	end
+	endtask
 
 	always @(posedge clk_be) begin
 		fifo_wr_en   <= 1'b0;
@@ -275,57 +440,126 @@ module tb_fdc1772_physical;
 			end
 		end
 
-		// ---- read operation ----
-		case (be_state)
-		0: begin
-			if (be_rdreq_s ^ be_rdreq_sd) begin
-				be_op  <= phys_rd_op;
-				be_idx <= 10'd0;
-				if (phys_rd_op == RDOP_READ_SECTOR)       be_state <= 3'd1; // stream 512
-				else if (phys_rd_op == RDOP_READ_ADDRESS) be_state <= 3'd4; // stream 6
-				else begin
-					// verify: report OK immediately (matching track -> no seek error)
-					phys_rd_result  <= RES_OK; phys_rd_rnf <= 1'b0;
-					phys_rd_crc_err <= 1'b0;   phys_rd_deleted <= 1'b0;
-					phys_rd_done_tgl <= ~phys_rd_done_tgl;
-				end
+		// ---- request/cancel edges (any state): pending latch, cancel abort ----
+		if (be_rdreq_s ^ be_rdreq_sd)
+			be_pend <= 1'b1;                     // served by the idle state
+		if (be_cancel_s ^ be_cancel_sd) begin
+			be_pend <= 1'b0;                     // cancel clears the pending latch
+			if (be_state != 4'd0) begin
+				// abort the op in flight; complete it later with ITS OWN tag
+				be_state <= 4'd7;
+				be_dly   <= be_cancel_delay;
 			end
 		end
-		1: begin // push 512 data bytes, one per clk_be cycle
+
+		// ---- idle-poison stimulus: stray bytes while no op runs ----
+		if (poison_req != 0 && be_state == 4'd0 && !be_pend) begin
+			fifo_wr_en   <= 1'b1;
+			fifo_wr_data <= 8'hDD;
+			poison_req   <= poison_req - 4'd1;
+		end
+
+		// ---- tb-paced single push (test 9: presentation/CPU-read collision) ----
+		if (push_req) begin
+			fifo_wr_en   <= 1'b1;
+			fifo_wr_data <= push_val;
+			push_req     <= 1'b0;
+		end
+
+		// ---- read operation FSM ----
+		case (be_state)
+		4'd0: begin // idle: serve a (possibly latched) request
+			if (be_pend) begin
+				be_pend <= 1'b0;
+				be_seq  <= phys_rd_seq;   // sample tag + params (quasi-static)
+				be_op   <= phys_rd_op;
+				be_idx  <= 10'd0;
+				be_dly  <= be_start_delay;
+				if (stray_req) begin
+					// residue regression: one spurious byte enters the FIFO
+					// after the op started (drain closed), BEFORE the real
+					// reply bytes -- models residue slipping into an operation
+					fifo_wr_en   <= 1'b1;
+					fifo_wr_data <= 8'hEE;
+					stray_req    <= 1'b0;
+				end
+				be_state <= 4'd6;
+			end
+		end
+		4'd6: begin // optional start delay (models seek/rotational latency)
+			if (be_dly != 0) be_dly <= be_dly - 16'd1;
+			else if (err_req) begin
+				// forced ERROR completion with crc=1 AND rnf=1 and no bytes:
+				// exactly what a pre-round-10 controller emitted; the DUT
+				// status must show CRC only (RNF suppressed)
+				err_req <= 1'b0;
+				be_done(be_seq, 1'b1, 1'b1);
+				be_state <= 4'd0;
+			end
+			else if (manual_req) be_state <= 4'd8;
+			else if (be_op == RDOP_READ_SECTOR)  be_state <= 4'd1;
+			else if (be_op == RDOP_READ_ADDRESS) begin
+				be_racrc <= 16'hB230;    // CRC state after A1 A1 A1 FE
+				be_state <= 4'd4;
+			end else begin
+				// verify: report OK immediately (matching track -> no seek error)
+				be_done(be_seq, 1'b0, 1'b0);
+				be_state <= 4'd0;
+			end
+		end
+		4'd1: begin // push 512 data bytes, one per clk_be cycle
 			fifo_wr_en   <= 1'b1;
 			fifo_wr_data <= pat(be_idx);
 			be_idx       <= be_idx + 10'd1;
-			if (be_idx == 10'd511) be_state <= 3'd2;
+			if (be_idx == 10'd511) be_state <= 4'd2;
 		end
-		2: begin // report done OK
-			phys_rd_result  <= RES_OK; phys_rd_rnf <= 1'b0;
-			phys_rd_crc_err <= 1'b0;   phys_rd_deleted <= 1'b0;
-			phys_rd_c <= 8'h03; phys_rd_h <= 8'h00; phys_rd_r <= 8'h01; phys_rd_n <= 8'h02;
-			phys_rd_done_tgl <= ~phys_rd_done_tgl;
-			be_state <= 3'd0;
+		4'd2: begin // report done OK (with the accepted tag)
+			be_done(be_seq, 1'b0, 1'b0);
+			be_state <= 4'd0;
 		end
-		4: begin // Read Address: push C,H,R,N,CRC-hi,CRC-lo
+		4'd4: begin // Read Address: push C,H,R,N + true CCITT CRC (hi,lo)
 			fifo_wr_en <= 1'b1;
 			case (be_idx)
-				0: fifo_wr_data <= 8'h03;
-				1: fifo_wr_data <= 8'h00;
-				2: fifo_wr_data <= 8'h01;
-				3: fifo_wr_data <= 8'h02;
-				4: fifo_wr_data <= 8'hAA;
-				default: fifo_wr_data <= 8'h55;
+				10'd0: begin fifo_wr_data <= ra_c; be_racrc <= crc16(be_racrc, ra_c); end
+				10'd1: begin fifo_wr_data <= ra_h; be_racrc <= crc16(be_racrc, ra_h); end
+				10'd2: begin fifo_wr_data <= ra_r; be_racrc <= crc16(be_racrc, ra_r); end
+				10'd3: begin fifo_wr_data <= ra_n; be_racrc <= crc16(be_racrc, ra_n); end
+				10'd4: fifo_wr_data <= be_racrc[15:8];
+				default: fifo_wr_data <= be_racrc[7:0];
 			endcase
 			be_idx <= be_idx + 10'd1;
-			if (be_idx == 10'd5) be_state <= 3'd5;
+			if (be_idx == 10'd5) be_state <= 4'd5;
 		end
-		5: begin
-			phys_rd_result <= RES_OK; phys_rd_rnf <= 1'b0;
-			phys_rd_crc_err <= 1'b0;  phys_rd_deleted <= 1'b0;
-			phys_rd_c <= 8'h03; phys_rd_h <= 8'h00; phys_rd_r <= 8'h01; phys_rd_n <= 8'h02;
-			phys_rd_done_tgl <= ~phys_rd_done_tgl;
-			be_state <= 3'd0;
+		4'd5: begin
+			be_done(be_seq, 1'b0, 1'b0);
+			be_state <= 4'd0;
 		end
-		default: be_state <= 3'd0;
+		4'd7: begin // cancelled: complete the ABORTED op with ITS OWN tag
+			if (be_dly != 0) be_dly <= be_dly - 16'd1;
+			else begin
+				be_done(be_seq, 1'b1, 1'b0);
+				be_state <= 4'd0;
+			end
+		end
+		4'd8: begin // manual op (test 9): tb pushes bytes; done on request
+			if (manual_done_req) begin
+				manual_done_req <= 1'b0;
+				manual_req      <= 1'b0;
+				be_done(be_seq, 1'b0, 1'b0);
+				be_state        <= 4'd0;
+			end
+		end
+		default: be_state <= 4'd0;
 		endcase
+	end
+
+	// (10) count the request edges the mock controller actually sees (a
+	// phantom reissue would add an extra one)
+	integer be_req_edges = 0;
+	reg     be_rdreq_pd = 0;
+	always @(posedge clk_be) begin
+		be_rdreq_pd <= be_rdreq_s;
+		if (be_rdreq_s ^ be_rdreq_pd) be_req_edges = be_req_edges + 1;
 	end
 
 	// -----------------------------------------------------------------------
@@ -341,12 +575,9 @@ module tb_fdc1772_physical;
 	end
 	endtask
 
-	// MEGA65 (#90 review): model the REAL drive CPU bus cycle. The 1581's T65 keeps
-	// the address (and thus cpu_sel) asserted for a full 2 MHz cycle (~16 clkcpu)
-	// and latches the read data at the CLOSING enable tick -- i.e. at the END of
-	// the access, not one clkcpu after cpu_sel rises. Sampling early masked a real
-	// bug where the physical read path replaced data_out mid-access with the next
-	// buffered FIFO byte. Hold cpu_sel for 16 clkcpu and sample on the last tick.
+	// model the REAL drive CPU bus cycle: the 1581's T65 keeps the address (and
+	// thus cpu_sel) asserted for a full 2 MHz cycle (~16 clkcpu) and latches the
+	// read data at the CLOSING enable tick -- i.e. at the END of the access.
 	task cpu_read(input [1:0] a, output [7:0] d);
 		integer k;
 	begin
@@ -370,7 +601,7 @@ module tb_fdc1772_physical;
 		while (fdc_busy !== val) begin
 			@(posedge clkcpu);
 			n = n + 1;
-			if (n > 2000000) begin
+			if (n > 4000000) begin
 				errors = errors + 1;
 				$display("FAIL: timeout waiting busy=%0d (%0s) @%0t", val, what, $time);
 				disable wait_busy;
@@ -380,19 +611,99 @@ module tb_fdc1772_physical;
 	endtask
 
 	// -----------------------------------------------------------------------
+	// ROM-faithful transfer loop ($CD17 idiom): poll BUSY FIRST, DRQ second,
+	// take a byte only while busy=1 && drq=1, exit the moment busy reads 0.
+	// Collects into rxbuf/rxcnt (caller resets rxcnt); records the time of the
+	// last data read and of the first busy=0 status sample (busy-tail measure).
+	// -----------------------------------------------------------------------
+	reg [7:0] rxbuf [0:1023];
+	integer   rxcnt;
+	time      last_data_time, busy_clear_time;
+
+	task rom_drain(input integer maxpoll, input [255:0] what);
+		integer g;
+		reg [7:0] st, d;
+	begin
+		g = 0;
+		forever begin
+			cpu_read(REG_CMDSTATUS, st);       // ROM: LDA $6000 / AND #$03 / LSR
+			if (st[0] !== 1'b1) begin
+				busy_clear_time = $time;
+				disable rom_drain;             // busy gone -> ROM exits its loop
+			end
+			if (st[1] === 1'b1) begin
+				cpu_read(REG_DATA, d);
+				last_data_time = $time;
+				if (rxcnt < 1024) rxbuf[rxcnt] = d;
+				rxcnt = rxcnt + 1;
+			end
+			g = g + 1;
+			if (g > maxpoll) begin
+				errors = errors + 1;
+				$display("FAIL: rom_drain guard exceeded (%0s, got %0d bytes) @%0t",
+				         what, rxcnt, $time);
+				disable rom_drain;
+			end
+		end
+	end
+	endtask
+
+	// take exactly n bytes with the same idiom, then return with the op running
+	task rom_take(input integer n, input integer maxpoll, input [255:0] what);
+		integer g;
+		reg [7:0] st, d;
+	begin
+		g = 0;
+		while (rxcnt < n) begin
+			cpu_read(REG_CMDSTATUS, st);
+			if (st[0] !== 1'b1) begin
+				errors = errors + 1;
+				$display("FAIL: busy dropped early during rom_take (%0s) @%0t", what, $time);
+				disable rom_take;
+			end
+			if (st[1] === 1'b1) begin
+				cpu_read(REG_DATA, d);
+				last_data_time = $time;
+				if (rxcnt < 1024) rxbuf[rxcnt] = d;
+				rxcnt = rxcnt + 1;
+			end
+			g = g + 1;
+			if (g > maxpoll) begin
+				errors = errors + 1;
+				$display("FAIL: rom_take guard exceeded (%0s) @%0t", what, $time);
+				disable rom_take;
+			end
+		end
+	end
+	endtask
+
+	// -----------------------------------------------------------------------
 	// stimulus
 	// -----------------------------------------------------------------------
-	reg [7:0] rbyte, status;
-	integer   got, guard;
+	reg  [7:0]  rbyte, status;
+	reg  [15:0] swcrc;
+	integer     i, k, exp_fin, base_stale, base_busycmd, base_drain;
+	integer     base_lost, base_req;
+	reg  [1:0]  seq_before;
+	time        t_start;
 
 	initial begin
-		// global watchdog
-		#4_000_000;
+		// global watchdog (the paced RS ops alone are ~15.5 ms each; tests
+		// 2a, 3 and 10 each stream a full 512-byte sector at pace)
+		#200_000_000;
 		$display("FAIL: global timeout");
 		$fatal(1, "global timeout");
 	end
 
 	initial begin
+		// CRC function self-check against the known MFM constants:
+		// CRC(A1,A1,A1) from FFFF = CDB4; +FE = B230 (the $DA63 preset)
+		if (crc16(crc16(crc16(16'hFFFF, 8'hA1), 8'hA1), 8'hA1) !== 16'hCDB4 ||
+		    crc16(16'hCDB4, 8'hFE) !== 16'hB230) begin
+			$display("FAIL: tb crc16 self-check");
+			$fatal(1, "tb crc16 self-check");
+		end
+
 		// reset
 		floppy_reset = 1'b0;
 		// Emulate FPGA power-up-to-0 for the image-path timers that the WD model's
@@ -408,8 +719,27 @@ module tb_fdc1772_physical;
 		repeat (8) @(posedge clkcpu);
 		floppy_reset = 1'b1;
 		repeat (8) @(posedge clkcpu);
+		exp_fin = 0;
 
-		// -------------------- 1) RESTORE (0x00) --------------------
+		// ------------- (1) REGISTER-INIT READBACK (ROM $C343 pattern) -------------
+		// The DOS power-up self test writes $FF..$01 to the WD track/sector/data
+		// registers and verifies EVERY readback; one mismatch aborts controller
+		// init with error $0D (track register stuck at $FF -- seen on hardware).
+		$display("--- (1) REGISTER INIT READBACK ($C343 pattern) ---");
+		for (i = 255; i >= 1; i = i - 1) begin
+			cpu_write(REG_TRACK,  i[7:0]);
+			cpu_write(REG_SECTOR, i[7:0]);
+			cpu_write(REG_DATA,   i[7:0]);
+			cpu_read(REG_TRACK, rbyte);
+			if (rbyte !== i[7:0]) begin errors = errors + 1; $display("FAIL: track readback wrote %02h got %02h", i[7:0], rbyte); end
+			cpu_read(REG_SECTOR, rbyte);
+			if (rbyte !== i[7:0]) begin errors = errors + 1; $display("FAIL: sector readback wrote %02h got %02h", i[7:0], rbyte); end
+			cpu_read(REG_DATA, rbyte);
+			if (rbyte !== i[7:0]) begin errors = errors + 1; $display("FAIL: data readback wrote %02h got %02h", i[7:0], rbyte); end
+		end
+		$display("ok  : 255 x3 register readbacks byte-exact");
+
+		// -------------------- RESTORE (0x00) --------------------
 		$display("--- RESTORE (head starts at %0d) ---", head);
 		cpu_write(REG_CMDSTATUS, 8'h00);
 		wait_busy(1'b1, "restore accepted");
@@ -419,7 +749,7 @@ module tb_fdc1772_physical;
 		expect_eq(head,   0,     "physical head at track0 after restore");
 		expect_eq(irq,    1'b1,  "INTRQ asserted after restore");
 
-		// -------------------- 2) SEEK to track 3 (0x10) --------------------
+		// -------------------- SEEK to track 3 (0x10) --------------------
 		$display("--- SEEK to 3 ---");
 		cpu_write(REG_DATA, 8'h03);     // seek target -> data register
 		cpu_write(REG_CMDSTATUS, 8'h10);
@@ -429,99 +759,65 @@ module tb_fdc1772_physical;
 		expect_eq(rbyte, 8'h03, "track register after seek");
 		expect_eq(head,   3,     "physical head at cyl 3 after seek");
 
-		// -------------------- 3) READ SECTOR 1 (0x80) --------------------
-		$display("--- READ SECTOR 1 ---");
+		// -------------------- SEEK with VERIFY (0x14, same track) --------------------
+		$display("--- SEEK 3 with V flag (verify op) ---");
+		cpu_write(REG_DATA, 8'h03);
+		cpu_write(REG_CMDSTATUS, 8'h14);
+		wait_busy(1'b1, "seek+V accepted");
+		wait_busy(1'b0, "seek+V done");
+		exp_fin = exp_fin + 1;
+		cpu_read(REG_CMDSTATUS, status);
+		expect_eq(status[4], 1'b0, "no seek error after verify");
+
+		// ------------- (2a) READ SECTOR, ROM loop, byte-exact + (8) busy tail -------------
+		$display("--- (2a) READ SECTOR 1 (ROM busy-first loop, 512 bytes, ~15.5 ms) ---");
 		cpu_write(REG_TRACK,  8'h03);
 		cpu_write(REG_SECTOR, 8'h01);
 		cpu_write(REG_CMDSTATUS, 8'h80);
 		wait_busy(1'b1, "read-sector accepted");
-
-		// drain 512 DRQ-paced bytes and check them against the pattern
-		got   = 0;
-		guard = 0;
-		while (got < 512) begin
-			@(posedge clkcpu);
-			guard = guard + 1;
-			if (guard > 4_000_000) begin
+		rxcnt = 0;
+		rom_drain(40000, "read sector");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 512, "ROM loop took exactly 512 sector bytes");
+		for (i = 0; i < 512; i = i + 1)
+			if (rxbuf[i] !== pat(i[9:0])) begin
 				errors = errors + 1;
-				$display("FAIL: timeout draining sector (got %0d/512)", got);
-				got = 512;
+				if (errors < 12)
+					$display("FAIL: data[%0d] got=0x%0h exp=0x%0h", i, rxbuf[i], pat(i[9:0]));
 			end
-			else if (drq === 1'b1) begin
-				cpu_read(REG_DATA, rbyte);
-				if (rbyte !== pat(got[9:0])) begin
-					errors = errors + 1;
-					if (errors < 12)
-						$display("FAIL: data[%0d] got=0x%0h exp=0x%0h", got, rbyte, pat(got[9:0]));
-				end
-				got = got + 1;
-			end
-		end
-		$display("drained %0d bytes", got);
-
-		wait_busy(1'b0, "read-sector done");
-		repeat (4) @(posedge clkcpu);   // busy now clears on CONSUMPTION of the
-		                                // last byte; give the registered INTRQ its edge
-		expect_eq(irq, 1'b1, "INTRQ asserted after read sector");
-
-		// final status: motor(b7)=1, wp(b6)=0, deleted(b5)=0, RNF(b4)=0,
-		// CRC(b3)=0, lost(b2)=0, DRQ(b1)=0, busy(b0)=0  => 0x80
+		$display("ok  : 512 sector bytes byte-exact");
+		// (8) busy-tail: busy must outlive the last DRQ/data byte by >= ~1 byte-time
+		if (busy_clear_time - last_data_time < (BYTE_NS * 8) / 10 ||
+		    busy_clear_time - last_data_time > BYTE_NS * 4) begin
+			errors = errors + 1;
+			$display("FAIL: busy tail after last byte = %0d ns (expected ~%0d ns)",
+			         busy_clear_time - last_data_time, BYTE_NS);
+		end else
+			$display("ok  : busy tail after last data byte = %0d ns (~1 byte-time)",
+			         busy_clear_time - last_data_time);
+		expect_eq(phys_dbg_pres_cnt, 11'd512, "pres_cnt diagnostic after read sector");
+		// final status: motor(b7)=1, all error bits clear => 0x80
 		cpu_read(REG_CMDSTATUS, status);
-		expect_eq(status[0], 1'b0, "status busy clear");
-		expect_eq(status[4], 1'b0, "status RNF clear");
-		expect_eq(status[3], 1'b0, "status CRC clear");
-		expect_eq(status[1], 1'b0, "status DRQ clear");
-		expect_eq(status[7], 1'b1, "status motor set");
-		expect_eq(status,    8'h80, "status word after clean read");
+		expect_eq(status, 8'h80, "status word after clean read");
 
-		// -------------------- 4) READ ADDRESS (0xC0) --------------------
-		// The 1581 DOS uses Read Address to locate the head, so the 6 reply
-		// bytes (C,H,R,N,CRC-hi,CRC-lo) must arrive byte-exact and in order.
-		// The backend queues all 6 instantly, so this exercises exactly the
-		// prebuffered-FIFO case where a too-early pop would shift the stream.
-		// CRITICAL: drain with the REAL 1581 ROM idiom ($CD17) -- poll BUSY
-		// FIRST and exit the loop the moment busy reads 0, take a byte only
-		// while busy=1 AND drq=1. If busy drops when the last byte is merely
-		// PRESENTED (instead of consumed), this loop loses the final byte --
-		// the ROM then fails its software CRC over the reply (error $09).
-		$display("--- READ ADDRESS ---");
+		// ------------- (2b) READ ADDRESS, ROM loop, byte-exact + software CRC -------------
+		$display("--- (2b) READ ADDRESS (ROM loop + $DA63 software CRC) ---");
 		cpu_write(REG_SECTOR, 8'hEE);          // WD must overwrite this with C
 		cpu_write(REG_CMDSTATUS, 8'hC0);
 		wait_busy(1'b1, "read-address accepted");
-		got   = 0;
-		guard = 0;
-		forever begin
-			@(posedge clkcpu);
-			guard = guard + 1;
-			if (guard > 4_000_000) begin
-				errors = errors + 1;
-				$display("FAIL: timeout draining read-address (got %0d/6)", got);
-				got = 6;
-			end
-			cpu_read(REG_CMDSTATUS, status);   // ROM: LDA $6000 / AND #$03 / LSR
-			if (status[0] !== 1'b1) break;     // busy gone -> ROM exits its loop
-			if (status[1] === 1'b1 && got < 6) begin
-				cpu_read(REG_DATA, rbyte);
-				case (got)
-					0: expect_eq(rbyte, 8'h03, "read-address byte0 (C)");
-					1: expect_eq(rbyte, 8'h00, "read-address byte1 (H)");
-					2: expect_eq(rbyte, 8'h01, "read-address byte2 (R)");
-					3: expect_eq(rbyte, 8'h02, "read-address byte3 (N)");
-					4: expect_eq(rbyte, 8'hAA, "read-address byte4 (CRC hi)");
-					5: expect_eq(rbyte, 8'h55, "read-address byte5 (CRC lo)");
-				endcase
-				got = got + 1;
-			end
-			if (got > 6) begin
-				errors = errors + 1;
-				$display("FAIL: more than 6 read-address bytes offered");
-				got = 6;
-			end
-		end
-		expect_eq(got[7:0], 8'd6, "ROM-style busy-first drain got all 6 bytes");
-		wait_busy(1'b0, "read-address done");
-		// (INTRQ was already cleared by the status polls of the drain loop,
-		// exactly as in the real ROM flow -- so no INTRQ expectation here.)
+		rxcnt = 0;
+		rom_drain(5000, "read address");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "ROM loop took exactly 6 RA bytes");
+		expect_eq(rxbuf[0], 8'h03, "read-address byte0 (C)");
+		expect_eq(rxbuf[1], 8'h00, "read-address byte1 (H)");
+		expect_eq(rxbuf[2], 8'h01, "read-address byte2 (R)");
+		expect_eq(rxbuf[3], 8'h02, "read-address byte3 (N)");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1)
+			swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "ROM software CRC residue over the 6-byte reply");
+		expect_eq(phys_dbg_pres_cnt, 11'd6, "pres_cnt diagnostic after read address");
 		cpu_read(REG_SECTOR, rbyte);
 		expect_eq(rbyte, 8'h03, "sector register = found C after read address");
 		cpu_read(REG_CMDSTATUS, status);
@@ -529,10 +825,275 @@ module tb_fdc1772_physical;
 		expect_eq(status[4], 1'b0, "ra status RNF clear");
 		expect_eq(status[1], 1'b0, "ra status DRQ clear");
 
+		// ------------- (4a) IDLE RESIDUE -> between-ops drain -------------
+		$display("--- (4a) IDLE FIFO POISON -> drain episode ---");
+		base_drain = cnt_drain;
+		poison_req = 4'd5;                 // 5 stray bytes while no op runs
+		repeat (200) @(posedge clkcpu);    // give the drain time to eat them
+		expect_eq(fifo_rd_empty, 1'b1, "FIFO empty again after idle poison");
+		if (cnt_drain <= base_drain) begin
+			errors = errors + 1;
+			$display("FAIL: no drain episode counted for idle poison");
+		end else
+			$display("ok  : drain episode counted (cnt_drain=%0d)", cnt_drain);
+		cpu_write(REG_CMDSTATUS, 8'hC0);   // and the next op is byte-exact
+		wait_busy(1'b1, "post-poison RA accepted");
+		rxcnt = 0;
+		rom_drain(5000, "post-poison RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "post-poison RA took 6 bytes");
+		expect_eq(rxbuf[0], 8'h03, "post-poison RA byte0 (C)");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "post-poison RA software CRC residue");
+
+		// ------------- (4b) RESIDUE INSIDE AN OP -> bounded, next op clean -------------
+		// One spurious byte enters the FIFO just after a Read Address starts
+		// (drain closed). Delivery v2 presents ALL FIFO bytes at pace -- the
+		// reply is shifted (the real ROM rejects it via its software CRC and
+		// retries) -- and the op MUST terminate one byte-time after the last
+		// presentation. Nothing is left over, so the follow-up is byte-exact.
+		$display("--- (4b) STRAY BYTE INSIDE AN OP ---");
+		stray_req = 1'b1;
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "stray-RA accepted");
+		rxcnt = 0;
+		rom_drain(5000, "stray RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 7, "stray-RA terminated after 7 bytes (no wedge)");
+		expect_eq(rxbuf[0], 8'hEE, "stray-RA byte0 is the stray (shifted reply)");
+		expect_eq(rxbuf[1], 8'h03, "stray-RA byte1 is the real C");
+		expect_eq(phys_dbg_pres_cnt, 11'd7, "pres_cnt diagnostic counts the stray");
+		swcrc = 16'hB230;                  // the ROM's check MUST fail on the shift
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		if (swcrc === 16'h0000) begin
+			errors = errors + 1;
+			$display("FAIL: shifted RA reply unexpectedly passed the software CRC");
+		end
+		repeat (100) @(posedge clkcpu);
+		cpu_write(REG_CMDSTATUS, 8'hC0);   // follow-up RA must be clean again
+		wait_busy(1'b1, "post-stray RA accepted");
+		rxcnt = 0;
+		rom_drain(5000, "post-stray RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "post-stray RA got all 6 bytes");
+		expect_eq(rxbuf[0], 8'h03, "post-stray byte0 (C) clean again");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "post-stray RA software CRC residue");
+
+		// ------------- (5) NON-FI COMMAND WRITE WHILE BUSY IS IGNORED -------------
+		$display("--- (5) COMMAND WRITE WHILE BUSY (must be ignored) ---");
+		base_busycmd   = cnt_busycmd;
+		be_start_delay = 16'd5000;         // ~100 us of extra busy time
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "busy-cmd RA accepted");
+		repeat (300) @(posedge clkcpu);    // well inside the op
+		cpu_write(REG_CMDSTATUS, 8'h00);   // RESTORE while busy -> must be IGNORED
+		repeat (10) @(posedge clkcpu);
+		expect_eq(fdc_busy, 1'b1, "still busy after ignored command write");
+		expect_eq(cnt_busycmd, base_busycmd + 1, "busycmd diag toggled once");
+		cpu_read(REG_TRACK, rbyte);
+		expect_eq(rbyte, 8'h03, "track register untouched by ignored RESTORE");
+		rxcnt = 0;
+		rom_drain(8000, "busy-cmd RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "op undisturbed by ignored command write");
+		expect_eq(rxbuf[0], 8'h03, "byte0 (C) still byte-exact");
+		expect_eq(head, 3, "head never moved (RESTORE really ignored)");
+		be_start_delay = 16'd0;
+
+		// ------------- (3) STALLED CPU MID-SECTOR -> LOST DATA, bounded completion -------------
+		$display("--- (3) STALLED CPU MID-SECTOR (~15.5 ms paced op) ---");
+		t_start = $time;
+		cpu_write(REG_TRACK,  8'h03);
+		cpu_write(REG_SECTOR, 8'h01);
+		cpu_write(REG_CMDSTATUS, 8'h80);
+		wait_busy(1'b1, "stall-RS accepted");
+		rxcnt = 0;
+		rom_take(100, 10000, "first 100 bytes before the stall");
+		#(5 * BYTE_NS);                    // CPU stops consuming for 5 byte-times
+		rom_drain(40000, "stall RS resume");
+		exp_fin = exp_fin + 1;
+		if (rxcnt >= 512) begin
+			errors = errors + 1;
+			$display("FAIL: stalled read lost no bytes (rxcnt=%0d)", rxcnt);
+		end else
+			$display("ok  : stalled read consumed %0d/512 (bytes lost as expected)", rxcnt);
+		if (cnt_lost == 0) begin
+			errors = errors + 1;
+			$display("FAIL: no LOST DATA diag event during the stall");
+		end else
+			$display("ok  : LOST DATA diag events = %0d", cnt_lost);
+		cpu_read(REG_CMDSTATUS, status);
+		expect_eq(status[0], 1'b0, "stall: busy dropped");
+		expect_eq(status[2], 1'b1, "stall: LOST DATA visible in status bit 2");
+		expect_eq(status[4], 1'b0, "stall: no RNF");
+		expect_eq(status[3], 1'b0, "stall: no CRC error");
+		if ($time - t_start > 520 * BYTE_NS) begin
+			errors = errors + 1;
+			$display("FAIL: stalled op exceeded 520 byte-times (%0d ns)", $time - t_start);
+		end else
+			$display("ok  : stalled op completed in %0d ns (< 520 byte-times)", $time - t_start);
+		// the NEXT op must be byte-exact (also proves LOST DATA clears at accept)
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "post-stall RA accepted");
+		rxcnt = 0;
+		rom_drain(5000, "post-stall RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "post-stall RA got all 6 bytes");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "post-stall RA software CRC residue");
+		cpu_read(REG_CMDSTATUS, status);
+		expect_eq(status[2], 1'b0, "LOST DATA cleared by the next command");
+
+		// ------------- (6) FORCE INTERRUPT -> stale done ignored via seq tag -------------
+		$display("--- (6) FORCE INTERRUPT MID-OP + STALE DONE ---");
+		base_stale      = cnt_stale;
+		be_start_delay  = 16'd3000;        // op idles ~60 us before streaming
+		be_cancel_delay = 16'd2000;        // cancelled op completes ~40 us later
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "FI-victim RA accepted");
+		repeat (200) @(posedge clkcpu);    // mid-op (backend still in start delay)
+		cpu_write(REG_CMDSTATUS, 8'hD0);   // Force Interrupt (no INTRQ flavor)
+		wait_busy(1'b0, "busy drops on Force Interrupt");
+		be_start_delay = 16'd0;
+		// fresh op BEFORE the cancelled op's late done arrives: its request is
+		// latched by the backend (pending), its seq differs from the stale done
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "fresh RA accepted");
+		rxcnt = 0;
+		rom_drain(8000, "fresh RA after FI");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "fresh RA after FI got all 6 bytes");
+		expect_eq(rxbuf[0], 8'h03, "fresh RA byte0 (C) byte-exact");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "fresh RA software CRC residue");
+		expect_eq(cnt_stale, base_stale + 1, "stale done ignored exactly once (seq tag)");
+		be_cancel_delay = 16'd0;
+
+		// ------------- (7b) FORCED crc+rnf COMPLETION -> RNF suppressed -------------
+		// A pre-round-10 controller emitted crc=1 AND rnf=1 (RES_DATA_CRC_ERROR
+		// family); the fdc-side belt must report CRC only, because the genuine
+		// DOS maps CRC+RNF to job SUCCESS via the $CD5A table hole.
+		$display("--- (7b) FORCED CRC+RNF COMPLETION (suppression belt) ---");
+		err_req = 1'b1;
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "err RA accepted");
+		rxcnt = 0;
+		rom_drain(5000, "err RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 0, "err completion streamed no bytes");
+		expect_eq(phys_dbg_pres_cnt, 11'd0, "pres_cnt diagnostic is 0 for the err op");
+		cpu_read(REG_CMDSTATUS, status);
+		expect_eq(status[3], 1'b1, "err completion: CRC error set");
+		expect_eq(status[4], 1'b0, "err completion: RNF SUPPRESSED by CRC");
+
+		// ------------- (9) PRESENTATION DUE DURING AN OPEN DATA-REGISTER READ -------------
+		// Round 10 F3: byte A is presented and left unconsumed until the pace has
+		// long expired (the pace then HOLDS at 0: present-on-arrival). The CPU
+		// then opens a 16-clkcpu read access on the data register (consuming A);
+		// byte B is pushed MID-ACCESS, so its presentation becomes due INSIDE the
+		// open access. It must be DEFERRED until the access closes: the CPU
+		// latches A uncorrupted at its closing tick, B presents right after the
+		// access (fresh DRQ, no duplicate of A), and because the deferred
+		// presentation samples a stable (already cleared) drq, no false LOST
+		// DATA is flagged.
+		$display("--- (9) PACED PRESENTATION vs OPEN CPU DATA-REGISTER READ ---");
+		base_lost  = cnt_lost;
+		manual_req = 1'b1;
+		cpu_write(REG_TRACK,  8'h03);
+		cpu_write(REG_SECTOR, 8'h01);
+		cpu_write(REG_CMDSTATUS, 8'h80);   // read sector; backend parks in manual state
+		wait_busy(1'b1, "manual RS accepted");
+		wait (be_state == 4'd8);           // backend accepted the op (phys_reading on)
+		push_val = 8'h5A; push_req = 1'b1; // byte A: presents immediately (pace expired)
+		wait (drq === 1'b1);
+		#(2 * BYTE_NS);                    // pace expires again and holds at 0
+		// open the 16-clkcpu data-register read access (same shape as cpu_read)
+		@(posedge clkcpu); #1;
+		cpu_sel = 1'b1; cpu_rw = 1'b1; cpu_addr = REG_DATA;
+		for (k = 0; k < 5; k = k + 1) @(posedge clkcpu);
+		push_val = 8'hA5; push_req = 1'b1; // byte B becomes due MID-ACCESS
+		for (k = 0; k < 10; k = k + 1) @(posedge clkcpu);
+		#1;
+		rbyte = cpu_dout;                  // the T65 latch at the closing tick
+		// prove B's presentation was DUE during the access ... and was deferred
+		expect_eq(dut.phys_pace_cnt, 8'd0, "(9) pace expired during the access");
+		expect_eq(fifo_rd_empty, 1'b0, "(9) byte B FIFO-visible before the close");
+		expect_eq(drq, 1'b0, "(9) presentation DEFERRED while the read is open");
+		@(posedge clkcpu); #1;
+		cpu_sel = 1'b0;
+		@(posedge clkcpu); #1;
+		expect_eq(rbyte, 8'h5A, "(9) CPU latched byte A uncorrupted at the closing tick");
+		wait (drq === 1'b1);               // B presents right after the access closes
+		cpu_read(REG_DATA, rbyte);
+		expect_eq(rbyte, 8'hA5, "(9) byte B presented after the access (no duplicate)");
+		expect_eq(cnt_lost, base_lost, "(9) no false LOST DATA from the collision");
+		manual_done_req = 1'b1;            // backend completes the op cleanly
+		rxcnt = 0;
+		rom_drain(8000, "manual RS completion");
+		exp_fin = exp_fin + 1;
+		cpu_read(REG_CMDSTATUS, status);
+		expect_eq(status[2], 1'b0, "(9) status LOST DATA clear");
+		expect_eq(phys_dbg_pres_cnt, 11'd2, "(9) exactly 2 bytes presented");
+
+		// ------------- (10) FORCE INTERRUPT vs DEFERRED MULTI-SECTOR REISSUE -------------
+		// Round 10 F1: a multi-sector read (m=1) is issued and NOT consumed; the
+		// op paces through all 512 presentations. Its finalize tick T sets
+		// phys_reissue, and the deferred reissue would execute at tick T+1. The
+		// Force Interrupt below is timed so its write edge lands exactly on T:
+		// the finalize still reads cmd=$90 (old value) and arms the reissue,
+		// while cmd_rx first reads 1 at tick T+1 -- together with the armed
+		// phys_reissue. Without the !cmd_rx gate this launches a phantom op
+		// (req toggle + seq bump) on the same edge as the cancel toggle.
+		$display("--- (10) FI COLLIDES WITH THE DEFERRED MULTI-SECTOR REISSUE TICK ---");
+		base_stale = cnt_stale;
+		base_req   = be_req_edges;
+		cpu_write(REG_TRACK,  8'h03);
+		cpu_write(REG_SECTOR, 8'h01);
+		cpu_write(REG_CMDSTATUS, 8'h90);   // read sector, multiple-sector flag
+		wait_busy(1'b1, "multi-sector RS accepted");
+		wait (dut.phys_pres_cnt == 11'd512);  // the 512th presentation tick P
+		expect_eq(be_req_edges, base_req + 1, "(10) sector-1 request reached the controller");
+		seq_before = phys_rd_seq;             // tag of the sector-1 op
+		// finalize tick T = P + 252 clk8m ticks = t_P + BYTE_NS. Aim the FI
+		// write edge exactly at T (cpu_write consumes one posedge + one cycle):
+		// call it 90 ns before T so its write-processing edge IS T.
+		#(BYTE_NS - 90);
+		cpu_write(REG_CMDSTATUS, 8'hD0);   // Force Interrupt (no INTRQ flavor)
+		repeat (30) @(posedge clkcpu);
+		if (fi_reissue_coll == 0) begin
+			errors = errors + 1;
+			$display("FAIL: (10) alignment missed -- no FI/reissue collision tick observed");
+		end else
+			$display("ok  : (10) FI/reissue collision tick observed (%0d)", fi_reissue_coll);
+		expect_eq(fdc_busy, 1'b0, "(10) busy clear after FI");
+		expect_eq(phys_rd_seq, seq_before, "(10) NO phantom reissue: seq tag unchanged");
+		expect_eq(dut.phys_rd_pending, 1'b0, "(10) NO phantom reissue: no op pending");
+		repeat (400) @(posedge clkcpu);    // give any phantom request time to cross
+		expect_eq(be_req_edges, base_req + 1, "(10) controller saw only the ONE real request");
+		expect_eq(cnt_stale, base_stale, "(10) no stale done (sector-1 done was consumed)");
+		// the WD must remain fully operational: follow-up RA byte-exact
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "post-collision RA accepted");
+		rxcnt = 0;
+		rom_drain(8000, "post-collision RA");
+		exp_fin = exp_fin + 2;             // sector-1 finalize + this RA
+		expect_eq(rxcnt, 6, "(10) post-collision RA got all 6 bytes");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "(10) post-collision RA software CRC residue");
+
 		// -------------------- verdict --------------------
 		repeat (10) @(posedge clkcpu);
+		expect_eq(cnt_fin, exp_fin, "finalize diag toggled once per completed op");
+		expect_eq(crc_rnf_viol, 0, "(7) status never showed CRC and RNF together");
+		expect_eq(data_mid_rd_viol, 0, "(9) data register never changed during an open CPU read");
 		if (errors == 0) begin
-			$display("==== PASS: all physical-mode checks passed ====");
+			$display("==== PASS: all physical-mode delivery-v2 checks passed ====");
 			$finish;
 		end else begin
 			$display("==== FAIL: %0d error(s) ====", errors);
