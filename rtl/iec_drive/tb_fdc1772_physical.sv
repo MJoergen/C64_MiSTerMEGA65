@@ -51,6 +51,14 @@
 //       same clk8m tick as a deferred multi-sector reissue produces NO
 //       phantom operation (seq tag unchanged, the controller sees no new
 //       request) and the WD stays fully operational.
+//   (11) round 11 fix A: a ZERO-STEP Type-I command (SEEK or RESTORE whose
+//       target track is already current, no step pulses) must hold busy for
+//       the WD1772 minimum Type-I busy time (~1.5 ms) so the 1581 DOS command
+//       writer's wait-busy-SET poll at $CBFA (~3.5 us cadence) can see it --
+//       driven with the exact ROM idiom: busy is observed within 3 polls,
+//       stays set 1..3 ms (measured), completes with INTRQ (no hang), and a
+//       following Read Address is byte-exact. (Before the fix busy dropped
+//       after ~380 ns, invisible to the poll -> DOS error-recovery hang.)
 //
 // Run:
 //   iverilog -g2012 -o tb.vvp tb_fdc1772_physical.sv fdc1772.v iecdrv_misc.sv
@@ -678,6 +686,42 @@ module tb_fdc1772_physical;
 	endtask
 
 	// -----------------------------------------------------------------------
+	// (11) ROM-faithful "wait busy SET" poll ($CBFA idiom): after writing a
+	// Type-I command, spin reading the STATUS register (busy = bit 0) at a
+	// ~3.5 us cadence, looping while busy reads CLEAR -- exactly what the 1581
+	// DOS command writer does at $CBFA (BIT $6000 / BEQ). Records the poll count
+	// to first busy=SET (polls11) and the time it was first seen (t_set11) into
+	// module globals. The REAL ROM loop is UNBOUNDED (a never-set busy hangs the
+	// drive forever -- the round-11 bug); this bench bounds it at maxpoll so the
+	// failure surfaces as a loud "busy never observed" instead of a wall-clock
+	// hang. cpu_read is ~1.08 us, padded with #2400 -> ~3.5 us per poll.
+	integer polls11;
+	time    t_set11, t_clear11;
+	task rom_wait_busy_set(input integer maxpoll, input [255:0] what);
+		integer g;
+		reg [7:0] st;
+	begin
+		g = 0; t_set11 = 0; polls11 = 0;
+		forever begin
+			cpu_read(REG_CMDSTATUS, st);      // ROM: BIT $6000 (reads WD status)
+			g = g + 1;
+			if (st[0] === 1'b1) begin
+				t_set11 = $time; polls11 = g;
+				disable rom_wait_busy_set;    // busy seen SET -> ROM leaves the poll
+			end
+			#2400;                            // pad to ~3.5 us per poll iteration
+			if (g >= maxpoll) begin
+				errors = errors + 1;
+				polls11 = g;
+				$display("FAIL: busy never observed SET after %0d polls (%0s) @%0t",
+				         g, what, $time);
+				disable rom_wait_busy_set;
+			end
+		end
+	end
+	endtask
+
+	// -----------------------------------------------------------------------
 	// stimulus
 	// -----------------------------------------------------------------------
 	reg  [7:0]  rbyte, status;
@@ -1086,6 +1130,90 @@ module tb_fdc1772_physical;
 		swcrc = 16'hB230;
 		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
 		expect_eq(swcrc, 16'h0000, "(10) post-collision RA software CRC residue");
+
+		// ------------- (11) ZERO-STEP TYPE-I BUSY VISIBILITY (round 11 fix A) -------------
+		// A zero-step SEEK / RESTORE (the target track is ALREADY current) needs
+		// no step pulses and, before round 11, dropped busy after ~380 ns -- far
+		// too short for the 1581 DOS command writer's wait-busy-SET poll at $CBFA
+		// (BIT $6000 / BEQ, one read every ~3.5 us). That sub-microsecond busy
+		// pulse was INVISIBLE to the ROM, so the DOS error-recovery job's
+		// re-positioning zero-step seek at $CB0F hung forever (motor frozen on,
+		// LED frozen off, observed on hardware 2026-07-14). The real WD1772 keeps
+		// busy on the order of a millisecond even for zero steps; fix A restores
+		// that (PHYS_T1_MIN_TICKS ~= 1.5 ms). This test drives the exact ROM
+		// idiom and asserts: (a) busy is SEEN within the first 3 polls, (b) it
+		// stays set for 1..3 ms (measured), (c) the command completes with INTRQ
+		// (no hang), and (d) a following Read Address is byte-exact (engine sane).
+		$display("--- (11) ZERO-STEP TYPE-I BUSY VISIBILITY (round 11 fix A) ---");
+
+		// ---- 11a: zero-step SEEK -- data register == track register, no step ----
+		cpu_write(REG_TRACK, 8'h03);          // current track = N
+		cpu_write(REG_DATA,  8'h03);          // seek target  = N -> zero step
+		cpu_write(REG_CMDSTATUS, 8'h18);      // SEEK, h=1 (no spinup), V=0
+		rom_wait_busy_set(200, "(11a) SEEK busy-set poll");
+		expect_eq((polls11 <= 3), 1'b1, "(11a) busy=1 seen within first 3 ROM polls");
+		wait_busy(1'b0, "(11a) zero-step SEEK completes (no hang)");
+		t_clear11 = $time;
+		repeat (2) @(posedge clkcpu);         // INTRQ latches one tick after busy drops
+		expect_eq(irq, 1'b1, "(11a) INTRQ asserted after zero-step SEEK");
+		$display("ok  : (11a) zero-step SEEK busy held %0d ns (%0d poll(s) to first SET)",
+		         t_clear11 - t_set11, polls11);
+		if (t_clear11 - t_set11 < 1_000_000 || t_clear11 - t_set11 > 3_000_000) begin
+			errors = errors + 1;
+			$display("FAIL: (11a) zero-step SEEK busy %0d ns outside [1ms,3ms]",
+			         t_clear11 - t_set11);
+		end else
+			$display("ok  : (11a) zero-step SEEK busy duration within [1ms,3ms]");
+		cpu_read(REG_TRACK, rbyte);
+		expect_eq(rbyte, 8'h03, "(11a) track register unchanged by zero-step SEEK");
+		expect_eq(head, 3, "(11a) head never moved (truly zero-step)");
+		// (d) engine health: a Read Address right after must be byte-exact
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "(11a) post-SEEK RA accepted");
+		rxcnt = 0;
+		rom_drain(5000, "(11a) post-SEEK RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "(11a) post-SEEK RA got all 6 bytes");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "(11a) post-SEEK RA CRC residue (engine healthy)");
+
+		// ---- 11b: zero-step RESTORE at track0 -- mock exposes track0 via head ----
+		// A first RESTORE steps the head from 3 to 0 (multi-step, not measured).
+		// The SECOND RESTORE is zero-step because phys_track0_c is already
+		// asserted, so it is held busy SOLELY by the round-11 minimum Type-I
+		// timer -- the pure test of fix A on the RESTORE path.
+		$display("--- (11b) zero-step RESTORE at track0 ---");
+		cpu_write(REG_CMDSTATUS, 8'h08);      // RESTORE h=1: steps head 3 -> 0
+		wait_busy(1'b1, "(11b) priming RESTORE accepted");
+		wait_busy(1'b0, "(11b) priming RESTORE done");
+		expect_eq(head, 0, "(11b) head at track0 after priming RESTORE");
+		cpu_write(REG_CMDSTATUS, 8'h08);      // RESTORE h=1, head already 0 -> zero step
+		rom_wait_busy_set(200, "(11b) RESTORE busy-set poll");
+		expect_eq((polls11 <= 3), 1'b1, "(11b) busy=1 seen within first 3 ROM polls");
+		wait_busy(1'b0, "(11b) zero-step RESTORE completes (no hang)");
+		t_clear11 = $time;
+		repeat (2) @(posedge clkcpu);         // INTRQ latches one tick after busy drops
+		expect_eq(irq, 1'b1, "(11b) INTRQ asserted after zero-step RESTORE");
+		$display("ok  : (11b) zero-step RESTORE busy held %0d ns (%0d poll(s) to first SET)",
+		         t_clear11 - t_set11, polls11);
+		if (t_clear11 - t_set11 < 1_000_000 || t_clear11 - t_set11 > 3_000_000) begin
+			errors = errors + 1;
+			$display("FAIL: (11b) zero-step RESTORE busy %0d ns outside [1ms,3ms]",
+			         t_clear11 - t_set11);
+		end else
+			$display("ok  : (11b) zero-step RESTORE busy duration within [1ms,3ms]");
+		expect_eq(head, 0, "(11b) head still track0 after zero-step RESTORE");
+		// (d) engine health again
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "(11b) post-RESTORE RA accepted");
+		rxcnt = 0;
+		rom_drain(5000, "(11b) post-RESTORE RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "(11b) post-RESTORE RA got all 6 bytes");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "(11b) post-RESTORE RA CRC residue (engine healthy)");
 
 		// -------------------- verdict --------------------
 		repeat (10) @(posedge clkcpu);

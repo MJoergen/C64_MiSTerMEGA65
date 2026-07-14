@@ -249,6 +249,23 @@ reg  [10:0] phys_pres_cnt = 11'd0;  // bytes PRESENTED this op (diagnostics only
 reg         phys_lost_l   = 1'b0;   // phys LOST DATA flag (status bit 2, Type II/III)
 reg         phys_draining = 1'b0;   // drain-episode tracker for phys_dbg_drain_tgl
 
+// MEGA65 (#90 round 11): MINIMUM Type-I busy duration in phys mode. A zero-step
+// SEEK (track already equals the target) or a RESTORE with TR00 already active
+// completes in ~3 clk8m ticks (~380 ns) in this RTL, but the real WD1772's
+// internal microcode keeps busy set for on the order of a millisecond even
+// when no step pulses are needed. The 1581 ROM RELIES on that: its command
+// writer at $CBF4 spins in "wait busy-SET" ($CBFA: BIT $6000 / BEQ, one poll
+// every ~3.5 us at 2 MHz) AFTER writing the command -- a sub-microsecond busy
+// pulse is invisible to it and the DOS hangs forever with I set (motor frozen
+// on, LED frozen off, zero further WD traffic; observed on hardware when the
+// error-recovery job $C0 issued its re-positioning zero-step seek at $CB0F).
+// Type II/III ops are inherently slow (controller round trip >= ms) and Force
+// Interrupt must stay immediate, so only Type-I completion is gated. 12000
+// ticks ~= 1.5 ms, matching the real chip's order of magnitude (and the
+// rom_emu reference model's max(1,n)*1.5 ms).
+localparam [13:0] PHYS_T1_MIN_TICKS = 14'd12000;
+reg  [13:0] phys_t1_min_cnt = 14'd0; // clk8m ticks; Type-I may not finish before 0
+
 // MEGA65 (#90 round 10 hardening): never present INTO an open drive-CPU READ
 // access of the WD data register. The T65 keeps cpu_sel/cpu_addr asserted for
 // the whole 2 MHz bus cycle (~16 clkcpu) and latches cpu_dout at the CLOSING
@@ -660,6 +677,7 @@ always @(posedge clkcpu) begin : label2
 		phys_reissue      <= 1'b0;
 		phys_rnf_l <= 1'b0; phys_crc_l <= 1'b0; phys_del_l <= 1'b0;
 		phys_step_tally <= 8'd0;
+		phys_t1_min_cnt <= 14'd0;
 		phys_step_ack_serviced <= phys_step_ack_c;
 		phys_rd_done_serviced  <= phys_rd_done_c_d2;
 	end else if (clk8m_en) begin
@@ -680,8 +698,12 @@ always @(posedge clkcpu) begin : label2
 			step_rate_cnt <= step_rate_cnt - 16'd1;
 
 		// delay timer
-		if(delay_cnt != 0) 
+		if(delay_cnt != 0)
 			delay_cnt <= delay_cnt - 1'd1;
+
+		// MEGA65 (#90 round 11): minimum Type-I busy time (see declaration)
+		if(phys_t1_min_cnt != 0)
+			phys_t1_min_cnt <= phys_t1_min_cnt - 14'd1;
 
 		// just received a new command
 		if(cmd_rx) begin
@@ -712,6 +734,8 @@ always @(posedge clkcpu) begin : label2
 				if (phys_mode) begin
 					phys_cmd_clear <= 1'b1;
 					phys_rnf_l <= 1'b0; phys_crc_l <= 1'b0; phys_del_l <= 1'b0;
+					// round 11: arm the minimum Type-I busy time (see declaration)
+					if (cmd_type_1) phys_t1_min_cnt <= PHYS_T1_MIN_TICKS;
 				end
 			end
 
@@ -876,9 +900,15 @@ always @(posedge clkcpu) begin : label2
 
 				// finish
 				3: begin
-					busy <= 1'b0;
-					irq_set <= 1'b1; // emit irq when command done
-					seek_state <= 0;
+					// MEGA65 (#90 round 11): in phys mode hold busy until the
+					// minimum Type-I busy time has elapsed -- a zero-step seek or
+					// restore must stay observable to the ROM's wait-busy-set poll
+					// (see the PHYS_T1_MIN_TICKS declaration). Image mode unchanged.
+					if (!phys_mode || phys_t1_min_cnt == 14'd0) begin
+						busy <= 1'b0;
+						irq_set <= 1'b1; // emit irq when command done
+						seek_state <= 0;
+					end
 				   end
 				endcase
 			end // if (cmd_type_1)
@@ -1147,8 +1177,11 @@ always @(posedge clkcpu) begin : label2
 			// stalled CPU gets LOST DATA (status bit 2), not a wedged WD, and an
 			// error result with partial pushes presents its bytes at pace and
 			// then completes with the error status.
+			// (round 11: a verify completion is a Type-I completion, so it also
+			// honors the minimum Type-I busy time -- see PHYS_T1_MIN_TICKS.)
 			if (phys_done_latched && phys_byte_empty && phys_pace_cnt == 8'd0
-			    && !phys_present_now) begin
+			    && !phys_present_now
+			    && (!phys_verify || phys_t1_min_cnt == 14'd0)) begin
 				phys_done_latched <= 1'b0;
 				phys_reading      <= 1'b0;
 				RNF               <= phys_rnf_l;
