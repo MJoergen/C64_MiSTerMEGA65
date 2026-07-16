@@ -59,6 +59,13 @@
 //       stays set 1..3 ms (measured), completes with INTRQ (no hang), and a
 //       following Read Address is byte-exact. (Before the fix busy dropped
 //       after ~380 ns, invisible to the poll -> DOS error-recovery hang.)
+//   (12) CRC quarantine: a complete 512-byte backend capture whose final
+//       result is DATA CRC ERROR is drained without presenting a single byte
+//       or DRQ to the ROM; a following clean operation remains byte-exact.
+//   (13) short-select collision: if the WD data-register select is visible for
+//       only one clkcpu, its registered DRQ-clear pulse still defers a byte
+//       that becomes due on the following clk8m tick. No swallowed DRQ and no
+//       false LOST DATA are permitted.
 //
 // Run:
 //   iverilog -g2012 -o tb.vvp tb_fdc1772_physical.sv fdc1772.v iecdrv_misc.sv
@@ -298,7 +305,9 @@ module tb_fdc1772_physical;
 		.phys_dbg_pres_cnt(phys_dbg_pres_cnt)
 	);
 
-	tb_rdfifo #(.AW(10)) rdfifo (
+	// Match production exactly: one complete 512-byte sector is the quarantine
+	// capacity. The 512th write is accepted and makes the FIFO full.
+	tb_rdfifo #(.AW(9)) rdfifo (
 		.wr_clk(clk_be), .wr_rst(~floppy_reset), .wr_en(fifo_wr_en),
 		.wr_data(fifo_wr_data), .wr_full(fifo_wr_full),
 		.rd_clk(clkcpu), .rd_rst(~floppy_reset), .rd_en(phys_byte_rd_en),
@@ -357,6 +366,14 @@ module tb_fdc1772_physical;
 		mon_data_q <= dut.data_out;
 	end
 
+	// (12) Before a tag-matched, clean controller completion, physical bytes
+	// are speculative. They must remain quarantined in the async FIFO instead
+	// of being exposed as WD data-register presentations.
+	integer precommit_present_viol = 0;
+	always @(posedge clkcpu)
+		if (dut.phys_present_now && !dut.phys_done_latched)
+			precommit_present_viol = precommit_present_viol + 1;
+
 	// -----------------------------------------------------------------------
 	// (10) round 10 F1 instrumentation: count clk8m ticks on which a deferred
 	// multi-sector reissue is pending in the SAME tick a Force Interrupt
@@ -394,6 +411,8 @@ module tb_fdc1772_physical;
 	reg        stray_req = 0;        // stimulus: ONE stray byte enters the FIFO at op start
 	reg [3:0]  poison_req = 0;       // stimulus: push N stray bytes while idle (drain food)
 	reg        err_req = 0;          // stimulus: complete next op with crc=1 AND rnf=1, 0 bytes
+	reg        crc_payload_req = 0;  // next sector pushes 512 bytes, then reports CRC error
+	reg        be_crc_bad = 0;       // crc_payload_req latched with the accepted operation
 	reg        manual_req = 0;       // stimulus: next op parks in a manual state (tb-paced
 	                                 //           pushes via push_req; done on manual_done_req)
 	reg        manual_done_req = 0;  // stimulus: complete the manual op now (clean)
@@ -483,6 +502,8 @@ module tb_fdc1772_physical;
 				be_op   <= phys_rd_op;
 				be_idx  <= 10'd0;
 				be_dly  <= be_start_delay;
+				be_crc_bad <= crc_payload_req;
+				crc_payload_req <= 1'b0;
 				if (stray_req) begin
 					// residue regression: one spurious byte enters the FIFO
 					// after the op started (drain closed), BEFORE the real
@@ -521,8 +542,9 @@ module tb_fdc1772_physical;
 			be_idx       <= be_idx + 10'd1;
 			if (be_idx == 10'd511) be_state <= 4'd2;
 		end
-		4'd2: begin // report done OK (with the accepted tag)
-			be_done(be_seq, 1'b0, 1'b0);
+		4'd2: begin // report the captured sector result (with the accepted tag)
+			be_done(be_seq, 1'b0, be_crc_bad);
+			be_crc_bad <= 1'b0;
 			be_state <= 4'd0;
 		end
 		4'd4: begin // Read Address: push C,H,R,N + true CCITT CRC (hi,lo)
@@ -536,11 +558,13 @@ module tb_fdc1772_physical;
 				default: fifo_wr_data <= be_racrc[7:0];
 			endcase
 			be_idx <= be_idx + 10'd1;
-			if (be_idx == 10'd5) be_state <= 4'd5;
-		end
-		4'd5: begin
-			be_done(be_seq, 1'b0, 1'b0);
-			be_state <= 4'd0;
+			if (be_idx == 10'd5) begin
+				// Match physical_1581_controller exactly: its sixth FIFO
+				// write and tagged done toggle occur in the same 50 MHz edge.
+				// The done synchronizer must not outrun the FIFO write pointer.
+				be_done(be_seq, 1'b0, 1'b0);
+				be_state <= 4'd0;
+			end
 		end
 		4'd7: begin // cancelled: complete the ABORTED op with ITS OWN tag
 			if (be_dly != 0) be_dly <= be_dly - 16'd1;
@@ -1035,12 +1059,51 @@ module tb_fdc1772_physical;
 		expect_eq(status[3], 1'b1, "err completion: CRC error set");
 		expect_eq(status[4], 1'b0, "err completion: RNF SUPPRESSED by CRC");
 
+		// ------------- (12) CRC-BAD CAPTURE IS NEVER EXPOSED TO THE ROM -------------
+		// The backend fills the production-sized 512-byte FIFO, then reports a
+		// data CRC error. Those bytes are not a committed sector. The WD must
+		// discard them without asserting DRQ; otherwise splice garbage reaches
+		// the genuine ROM before the CRC result exists.
+		$display("--- (12) CRC-BAD 512-BYTE CAPTURE QUARANTINE ---");
+		base_drain = cnt_drain;
+		base_lost  = cnt_lost;
+		crc_payload_req = 1'b1;
+		cpu_write(REG_TRACK,  8'h03);
+		cpu_write(REG_SECTOR, 8'h01);
+		cpu_write(REG_CMDSTATUS, 8'h80);
+		wait_busy(1'b1, "crc-bad RS accepted");
+		rxcnt = 0;
+		rom_drain(10000, "crc-bad RS quarantine");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 0, "CRC-bad sector exposed zero bytes to ROM");
+		expect_eq(phys_dbg_pres_cnt, 11'd0, "CRC-bad sector presentation count");
+		expect_eq(fifo_rd_empty, 1'b1, "CRC-bad sector FIFO drained");
+		expect_eq(cnt_lost, base_lost, "CRC-bad discard generated no LOST DATA");
+		if (cnt_drain <= base_drain) begin
+			errors = errors + 1;
+			$display("FAIL: CRC-bad payload was not discarded by a drain episode");
+		end else
+			$display("ok  : CRC-bad payload discarded by the idle/error drain");
+		cpu_read(REG_CMDSTATUS, status);
+		expect_eq(status[3], 1'b1, "CRC-bad sector status CRC set");
+		expect_eq(status[4], 1'b0, "CRC-bad sector status RNF clear");
+		// Recovery proof: quarantine/drain must not disturb the next operation.
+		cpu_write(REG_CMDSTATUS, 8'hC0);
+		wait_busy(1'b1, "post-CRC RA accepted");
+		rxcnt = 0;
+		rom_drain(5000, "post-CRC RA");
+		exp_fin = exp_fin + 1;
+		expect_eq(rxcnt, 6, "post-CRC RA got all 6 bytes");
+		swcrc = 16'hB230;
+		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
+		expect_eq(swcrc, 16'h0000, "post-CRC RA software CRC residue");
+
 		// ------------- (9) PRESENTATION DUE DURING AN OPEN DATA-REGISTER READ -------------
-		// Round 10 F3: byte A is presented and left unconsumed until the pace has
-		// long expired (the pace then HOLDS at 0: present-on-arrival). The CPU
-		// then opens a 16-clkcpu read access on the data register (consuming A);
-		// byte B is pushed MID-ACCESS, so its presentation becomes due INSIDE the
-		// open access. It must be DEFERRED until the access closes: the CPU
+		// Round 10 F3: byte A is presented and left unconsumed until the next
+		// presentation is about to become due. The CPU
+		// then opens a 16-clkcpu read access on the data register (consuming A).
+		// Byte B is already quarantined and its presentation becomes due INSIDE
+		// the open access. It must be DEFERRED until the access closes: the CPU
 		// latches A uncorrupted at its closing tick, B presents right after the
 		// access (fresh DRQ, no duplicate of A), and because the deferred
 		// presentation samples a stable (already cleared) drq, no false LOST
@@ -1052,16 +1115,20 @@ module tb_fdc1772_physical;
 		cpu_write(REG_SECTOR, 8'h01);
 		cpu_write(REG_CMDSTATUS, 8'h80);   // read sector; backend parks in manual state
 		wait_busy(1'b1, "manual RS accepted");
-		wait (be_state == 4'd8);           // backend accepted the op (phys_reading on)
-		push_val = 8'h5A; push_req = 1'b1; // byte A: presents immediately (pace expired)
+		wait (be_state == 4'd8);           // backend accepted the op
+		push_val = 8'h5A; push_req = 1'b1;
+		wait (push_req == 1'b0);
+		push_val = 8'hA5; push_req = 1'b1;
+		wait (push_req == 1'b0);
+		repeat (20) @(posedge clkcpu);
+		expect_eq(drq, 1'b0, "(9) bytes remain quarantined before clean done");
+		manual_done_req = 1'b1;            // clean result releases the two bytes
 		wait (drq === 1'b1);
-		#(2 * BYTE_NS);                    // pace expires again and holds at 0
+		wait (dut.phys_pace_cnt <= 8'd4);  // next presentation becomes due during the access
 		// open the 16-clkcpu data-register read access (same shape as cpu_read)
 		@(posedge clkcpu); #1;
 		cpu_sel = 1'b1; cpu_rw = 1'b1; cpu_addr = REG_DATA;
-		for (k = 0; k < 5; k = k + 1) @(posedge clkcpu);
-		push_val = 8'hA5; push_req = 1'b1; // byte B becomes due MID-ACCESS
-		for (k = 0; k < 10; k = k + 1) @(posedge clkcpu);
+		for (k = 0; k < 15; k = k + 1) @(posedge clkcpu);
 		#1;
 		rbyte = cpu_dout;                  // the T65 latch at the closing tick
 		// prove B's presentation was DUE during the access ... and was deferred
@@ -1076,13 +1143,52 @@ module tb_fdc1772_physical;
 		cpu_read(REG_DATA, rbyte);
 		expect_eq(rbyte, 8'hA5, "(9) byte B presented after the access (no duplicate)");
 		expect_eq(cnt_lost, base_lost, "(9) no false LOST DATA from the collision");
-		manual_done_req = 1'b1;            // backend completes the op cleanly
 		rxcnt = 0;
 		rom_drain(8000, "manual RS completion");
 		exp_fin = exp_fin + 1;
 		cpu_read(REG_CMDSTATUS, status);
 		expect_eq(status[2], 1'b0, "(9) status LOST DATA clear");
 		expect_eq(phys_dbg_pres_cnt, 11'd2, "(9) exactly 2 bytes presented");
+
+		// ------------- (13) ONE-CYCLE SELECT / REGISTERED DRQ-CLEAR COLLISION -------------
+		// A short select can disappear before cpu_rw_data (the registered WD data
+		// read strobe) clears DRQ. Arrange byte D to become due on that clear tick.
+		// Guarding only the combinational open-select level pops D, clears its new
+		// DRQ in the same edge, and falsely samples C's old DRQ as LOST.
+		$display("--- (13) SHORT DATA-SELECT vs REGISTERED DRQ CLEAR ---");
+		base_lost  = cnt_lost;
+		manual_req = 1'b1;
+		cpu_write(REG_CMDSTATUS, 8'h80);
+		wait_busy(1'b1, "short-select manual RS accepted");
+		wait (be_state == 4'd8);
+		push_val = 8'h3C; push_req = 1'b1;
+		wait (push_req == 1'b0);
+		push_val = 8'hC3; push_req = 1'b1;
+		wait (push_req == 1'b0);
+		manual_done_req = 1'b1;
+		wait (drq === 1'b1);               // C is presented; D remains in FIFO
+		wait (dut.phys_pace_cnt == 8'd0);  // next byte is due on the next clk8m tick
+		// Select is visible to the DUT for exactly one clkcpu edge.
+		cpu_sel = 1'b1; cpu_rw = 1'b1; cpu_addr = REG_DATA;
+		@(posedge clkcpu); #1;
+		rbyte = cpu_dout;
+		cpu_sel = 1'b0;
+		@(posedge clkcpu); #1;             // registered clear and due presentation collide here
+		expect_eq(rbyte, 8'h3C, "(13) short-select CPU latched byte C");
+		expect_eq(drq, 1'b0, "(13) old DRQ cleared on the collision tick");
+		expect_eq(fifo_rd_empty, 1'b0, "(13) byte D deferred across registered clear");
+		expect_eq(cnt_lost, base_lost, "(13) registered clear caused no false LOST DATA");
+		if (fifo_rd_empty !== 1'b1) begin
+			wait (drq === 1'b1);
+			cpu_read(REG_DATA, rbyte);
+			expect_eq(rbyte, 8'hC3, "(13) byte D has a fresh DRQ after deferral");
+		end
+		rxcnt = 0;
+		rom_drain(8000, "short-select manual RS completion");
+		exp_fin = exp_fin + 1;
+		cpu_read(REG_CMDSTATUS, status);
+		expect_eq(status[2], 1'b0, "(13) status LOST DATA clear");
+		expect_eq(phys_dbg_pres_cnt, 11'd2, "(13) exactly 2 bytes presented");
 
 		// ------------- (10) FORCE INTERRUPT vs DEFERRED MULTI-SECTOR REISSUE -------------
 		// Round 10 F1: a multi-sector read (m=1) is issued and NOT consumed; the
@@ -1220,8 +1326,9 @@ module tb_fdc1772_physical;
 		expect_eq(cnt_fin, exp_fin, "finalize diag toggled once per completed op");
 		expect_eq(crc_rnf_viol, 0, "(7) status never showed CRC and RNF together");
 		expect_eq(data_mid_rd_viol, 0, "(9) data register never changed during an open CPU read");
+		expect_eq(precommit_present_viol, 0, "(12) no byte presented before clean completion");
 		if (errors == 0) begin
-			$display("==== PASS: all physical-mode delivery-v2 checks passed ====");
+			$display("==== PASS: all CRC-gated physical-mode delivery checks passed ====");
 			$finish;
 		end else begin
 			$display("==== FAIL: %0d error(s) ====", errors);

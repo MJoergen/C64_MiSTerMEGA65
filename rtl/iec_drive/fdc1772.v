@@ -175,6 +175,7 @@ reg         data_transfer_start;
 reg         data_transfer_done;
 reg         sd_card_write;
 reg         sd_card_read;
+reg         cpu_rw_data;
 wire        sd_done_tgl_c;
 
 // -------------------------------------------------------------------------
@@ -226,7 +227,7 @@ end
 reg         phys_step_busy;         // waiting for a step ack
 reg         phys_rd_pending;        // a read op has been requested, not yet reported done
 reg         phys_reading;           // enable byte pace (drain the FIFO)
-reg         phys_done_latched;      // controller reported done; awaiting full drain
+reg         phys_done_latched;      // controller reported done; release clean FIFO / drain error
 reg         phys_verify;            // the in-flight read op is a Type-I verify
 reg         phys_reissue;           // deferred re-issue for a multiple-sector read
 reg         phys_rnf_l, phys_crc_l, phys_del_l;   // latched result flags
@@ -282,16 +283,26 @@ reg  [13:0] phys_t1_min_cnt = 14'd0; // clk8m ticks; Type-I may not finish befor
 // ~0.5 us versus the 32 us pace) -- still disk-time-bounded, NOT consumption-
 // coupled: it waits for the bus cycle to close, never for the byte to be
 // consumed (back-to-back data-register reads are always separated by opcode
-// fetches, which deassert the select).
+// fetches, which deassert the select). A short-select implementation can drop
+// cpu_sel before the registered cpu_rw_data pulse clears DRQ, so that pulse is
+// a second mandatory exclusion window.
 wire phys_cpu_rd_data_open = cpu_sel && cpu_rw && (cpu_addr == FDC_REG_DATA);
 
-// presentation fires on a clk8m tick with the pace expired and a byte
-// available; it never waits for the previous byte to be consumed (A2). The
-// pace counter holds at 0 across a read-access deferral, so a pace-expired
-// presentation happens immediately after the blocking access closes.
+// Physical bytes are SPECULATIVE until the controller has checked the complete
+// field CRC. The production 512-byte async FIFO is therefore also the sector
+// quarantine: presentation starts only after a tag-matched CLEAN done. An
+// error done drops phys_reading and the residue drain discards the FIFO without
+// ever asserting DRQ. This gives the proven WD/ROM side a completed-sector
+// transaction instead of exposing a live, unvalidated magnetic stream.
+//
+// Once released, presentation fires on a clk8m tick with the pace expired and
+// a byte available; it never waits for the previous byte to be consumed (A2).
+// The pace counter holds at 0 across a read-access deferral, so a pace-expired
+// presentation happens immediately after both exclusion windows close.
 wire phys_present_now = phys_mode && phys_reading
+                        && phys_done_latched && !phys_rnf_l && !phys_crc_l
                         && (phys_pace_cnt == 8'd0) && !phys_byte_empty
-                        && !phys_cpu_rd_data_open;
+                        && !phys_cpu_rd_data_open && !cpu_rw_data;
 
 // controller INPUTS that are pure combinational (EXT_MOTOR=1 for the 1581, so
 // fd_motor == floppy_motor). phys_byte_ovf is tied low: fdc1772 only sees the
@@ -467,7 +478,6 @@ end
 
 reg drq_set;
 
-reg cpu_rw_data;
 always @(posedge clkcpu)
 	cpu_rw_data <= ~cpu_selD && cpu_sel && cpu_addr == FDC_REG_DATA;
 
@@ -1153,16 +1163,21 @@ always @(posedge clkcpu) begin : label2
 					phys_c_l   <= phys_rd_c_c;
 					phys_rd_pending   <= 1'b0;
 					phys_done_latched <= 1'b1;
+					// A failed capture is not sector data. Close presentation and
+					// let the existing residue path discard every quarantined byte.
+					if (phys_rd_rnf_c || phys_rd_crc_err_c)
+						phys_reading <= 1'b0;
 				end else begin
 					phys_dbg_staledone_tgl <= ~phys_dbg_staledone_tgl;
 				end
 			end
 
-			// MEGA65 (#90 delivery v2): finalize -- the DISK-PACED completion of a
-			// physical read op. Fires on the first clk8m tick where (a) the
-			// controller done has been received and tag-matched, (b) the read FIFO
-			// is empty (every byte has been PRESENTED -- presentation never waits
-			// for consumption), and (c) the pace counter has expired again with no
+			// MEGA65 (#90): finalize -- the DISK-PACED completion of a physical
+			// read op. Clean captures are released only after their CRC-valid done;
+			// failed captures are drained unseen. Fires on the first clk8m tick
+			// where (a) the controller done has been received and tag-matched,
+			// (b) the read FIFO is empty (clean bytes presented, failed bytes
+			// discarded), and (c) the pace counter has expired again with no
 			// byte presenting this tick, i.e. at least one full byte-time after
 			// the last presentation. That is the real WD1772 shape: busy outlives
 			// the last DRQ by >= 1 byte-time (the image engine's
@@ -1470,11 +1485,13 @@ always @(posedge clkcpu) begin : label4
 
 	drq_set <= 1'b0;
 
-	// MEGA65 (#90 delivery v2): physical read -- DISK-PACED byte presentation.
+	// MEGA65 (#90): physical read -- CRC-GATED, DISK-PACED byte presentation.
 	// Every PHYS_PACE_TICKS clk8m ticks (one DD MFM byte-time, ~32 us) the head
 	// of the external read FIFO is popped into the data register and DRQ is
 	// raised -- exactly like the real WD1772, which moves a byte from its shift
 	// register into the data register at disk pace no matter what the host does.
+	// The physical controller must first report a clean complete-field result;
+	// until then the FIFO is quarantine and phys_present_now remains false.
 	// If the previous byte is still unconsumed (DRQ high) it is OVERWRITTEN and
 	// the phys LOST DATA flag is set (status bit 2). Presentation never waits
 	// for consumption, so completion (the label2 finalize) is bounded by disk
@@ -1512,8 +1529,10 @@ always @(posedge clkcpu) begin : label4
 	// or cancelled operation (Force Interrupt, disk change, core reset while the
 	// 50 MHz controller finished a sector into a stalled FIFO). The controller only
 	// pushes while an operation is in flight (spanned by phys_reading here), so this
-	// can never eat live data; it guarantees that every new operation starts from an
-	// empty FIFO instead of delivering a stale-shifted, CRC-clean-looking stream.
+	// can never eat committed clean data. It also discards a completed CRC/RNF error
+	// after its done handler drops phys_reading, and guarantees that every new
+	// operation starts from an empty FIFO instead of delivering a stale-shifted,
+	// CRC-clean-looking stream.
 	// Presentation and drain are mutually exclusive on phys_reading, so they can
 	// never pop in the same cycle. Each drain EPISODE (first drained byte after a
 	// non-draining cycle) toggles phys_dbg_drain_tgl for the diag counters.
