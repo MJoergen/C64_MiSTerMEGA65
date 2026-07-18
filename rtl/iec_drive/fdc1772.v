@@ -1461,17 +1461,15 @@ always @(posedge clkcpu) begin : label4
 	crc_en <= 0;
 	if(crc_en) crcval <= crc(crcval, data_out);
 
-	// MEGA65 (#90 bring-up): mirror the WRITTEN value into the readback register.
-	// This used to be `data_out <= data_in`, but data_in is assigned from cpu_din
-	// in the same clock edge (in the cpu-register-write block), so the readback
-	// was one write behind. The real WD1772 has ONE data register: reading it
-	// back returns what was just written. The 1581 ROM's power-up self test
-	// ($C347: write $FF..$01 to track/sector/data, verify each readback) fails
-	// on the stale value, aborts controller init with error $0D and leaves the
-	// drive permanently misbehaving (observed on hardware: track register stuck
-	// at $FF, no seeks, instant FILE NOT FOUND).
+	// MEGA65 (#90 bring-up): in PHYSICAL mode mirror the WRITTEN value into the
+	// readback register. The real WD1772 has one data register, and the genuine
+	// 1581 ROM startup test requires current-value readback. Image mode must keep
+	// the proven pre-#90 behavior exactly: its legacy engine mirrors data_in,
+	// which is the previous value here because data_in is written on this same
+	// edge. Making the physical fix unconditional in b2bd629 regressed simulated
+	// D81 loading; tb_fdc1772_image locks the image expression to 88c09d2.
 	if (cpu_we && cpu_addr == FDC_REG_DATA) begin
-		data_out <= cpu_din;
+		data_out <= phys_mode ? cpu_din : data_in;
 		data_in_valid <= 1;
 	end
 
