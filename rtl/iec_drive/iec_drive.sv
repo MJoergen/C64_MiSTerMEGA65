@@ -23,12 +23,13 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// 10 - 1581 (D81)
 	input   [1:0] img_type,
 
-	// MEGA65 physical internal 1581 (issue #90): mode select for drive 0 (the
-	// internal Commodore drive 8). A single bit is sufficient: only drive 0 can
-	// be backed by the real internal 3.5" drive; drives 1..N stay virtual. When
-	// set it forces the 1581 engine active, holds the 1541 engine in reset and
-	// masks drive-0 image DMA (sd_rd/sd_wr) off. See phys_mode_vec below.
-	input         physical_mode,
+	// MEGA65 physical internal 1581 (issues #90 and #93): per-drive mode select.
+	// Bit i set = drive i is backed by the real internal 3.5" drive: its 1581
+	// engine is forced active, its 1541 engine is held in reset and its image
+	// DMA (sd_rd/sd_wr) is masked off. There is only ONE physical mechanism, so
+	// at most one bit may be set at a time (the caller enforces this); the
+	// shared phys_* bundle below is driven by that drive (see c1581_multi).
+	input   [N:0] physical_mode,
 
 	output  [N:0] led,
 
@@ -121,9 +122,9 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
 localparam N   = NDR - 1;
 
-// MEGA65 (#90): drive-0-only physical-mode vector. physical_mode is a single
-// bit (internal drive 8); zero-extension puts it on bit 0 and leaves bits N..1
-// at 0, so only drive 0's engine-select and sd_rd/sd_wr gating are affected.
+// MEGA65 (#90/#93): per-drive physical-mode vector (at most one bit set, see
+// the port comment). Each bit affects only its drive's engine-select and
+// sd_rd/sd_wr gating.
 wire [N:0] phys_mode_vec = physical_mode;
 
 reg [N:0] dtype[2];
@@ -278,8 +279,9 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.sd_buff_din(c1581_sd_buff_dout),
 	.sd_buff_wr(sd_buff_wr),
 
-	// MEGA65 (#90): physical internal 1581 ABI, threaded to drive 0.
-	.phys_mode(physical_mode),
+	// MEGA65 (#90/#93): physical internal 1581 ABI, threaded to the one drive
+	// whose phys_mode bit is set (onehot mux inside c1581_multi).
+	.phys_mode(phys_mode_vec),
 	.phys_active(phys_active),
 	.phys_cia_motor_on(phys_cia_motor_on),
 	.phys_cia_side(phys_cia_side),

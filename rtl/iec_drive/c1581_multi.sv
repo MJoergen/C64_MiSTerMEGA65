@@ -57,13 +57,18 @@ module c1581_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input         rom_std,
 
 	// ---------------------------------------------------------------------
-	// MEGA65 physical internal 1581 (issue #90): drive-0 (internal) phys ABI,
-	// threaded from iec_drive down to the drive-0 c1581_drv/fdc1772. Only drive
-	// index 0 has a physical controller; any other generated drive stays virtual
-	// (its fdc phys inputs are tied 0 / outputs left open). phys_mode=0 keeps the
-	// image path byte-identical.
+	// MEGA65 physical internal 1581 (issues #90 and #93): per-drive phys ABI,
+	// threaded from iec_drive down to c1581_drv/fdc1772. There is ONE physical
+	// mechanism and ONE shared phys_* bundle: the drive whose phys_mode bit is
+	// set drives it (at most one bit may be set in steady state -- the caller
+	// additionally forces the vector through an all-zero gap on every change,
+	// see main.vhd). The controller-driven inputs go to ALL drives un-gated;
+	// each fdc1772 ignores them while its own phys_mode is 0. The toggle
+	// outputs are re-encoded so a select change never jumps their level (see
+	// the CAUTION block at the collectors below). phys_mode=0 everywhere
+	// keeps the image path byte-identical.
 	// ---------------------------------------------------------------------
-	input         phys_mode,
+	input   [N:0] phys_mode,
 
 	output        phys_active,
 	output        phys_cia_motor_on,
@@ -234,9 +239,27 @@ wire [N:0] act_led_drv, pwr_led_drv;
 assign     act_led = act_led_drv & ~reset_drv;
 assign     pwr_led = pwr_led_drv & ~reset_drv;
 
-// MEGA65 (#90): collect each generated drive's phys outputs; the module-level
-// phys_* bundle exposes only drive 0 (the internal 1581). Drives i>0 route to
-// unused wires (effectively open) and get their phys inputs tied 0 below.
+// MEGA65 (#90/#93): collect each generated drive's phys outputs; the module-
+// level phys_* bundle exposes the ONE drive selected by phys_mode (onehot; the
+// all-zero case selects drive 0, whose bundle is inert then because its own
+// phys_mode input is 0).
+//
+// CAUTION -- toggle-handshake signals must never jump on a select change: the
+// per-drive request toggles (step/read/cancel and the five debug events) are
+// parity-persistent by design (fdc1772 deliberately never resets them: a
+// reset "would inject a phantom edge into the controller"), so two drives
+// generally park at DIFFERENT levels. A plain mux would therefore make the
+// 50 MHz physical_1581_controller see a level jump -- i.e. a phantom step or
+// read request -- the moment the internal drive moves from drive 8 to 9 or
+// back. Instead, every toggle output below is RE-ENCODED: a per-drive
+// previous-level tracker (always up to date for all drives) flips a fresh
+// output register only on a REAL event of the drive that is in phys mode.
+// Select changes then never change any output level by construction.
+// The level/data outputs (active, motor, side, op/track/sector/seq, ovf,
+// byte_rd_en) stay plainly muxed: they are levels or quasi-static data that
+// are only interpreted while the controller is enabled, and main.vhd forces
+// the phys_mode vector through an all-zero gap on every change, so the
+// select never moves while any of them is live.
 wire [N:0] phys_active_d, phys_cia_motor_on_d, phys_cia_side_d;
 wire [N:0] phys_step_req_tgl_d, phys_step_outward_d, phys_rd_req_tgl_d;
 wire [N:0] phys_rd_side_d, phys_rd_cancel_tgl_d, phys_byte_ovf_d, phys_byte_rd_en_d;
@@ -248,26 +271,63 @@ wire [7:0] phys_rd_sector_d[NDR];
 wire [1:0] phys_rd_seq_d[NDR];
 wire [10:0] phys_dbg_pres_cnt_d[NDR];
 
-assign phys_active        = phys_active_d[0];
-assign phys_cia_motor_on  = phys_cia_motor_on_d[0];
-assign phys_cia_side      = phys_cia_side_d[0];
-assign phys_step_req_tgl  = phys_step_req_tgl_d[0];
-assign phys_step_outward  = phys_step_outward_d[0];
-assign phys_rd_req_tgl    = phys_rd_req_tgl_d[0];
-assign phys_rd_op         = phys_rd_op_d[0];
-assign phys_rd_track      = phys_rd_track_d[0];
-assign phys_rd_side       = phys_rd_side_d[0];
-assign phys_rd_sector     = phys_rd_sector_d[0];
-assign phys_rd_cancel_tgl = phys_rd_cancel_tgl_d[0];
-assign phys_rd_seq        = phys_rd_seq_d[0];
-assign phys_byte_ovf      = phys_byte_ovf_d[0];
-assign phys_byte_rd_en    = phys_byte_rd_en_d[0];
-assign phys_dbg_lost_tgl      = phys_dbg_lost_tgl_d[0];
-assign phys_dbg_drain_tgl     = phys_dbg_drain_tgl_d[0];
-assign phys_dbg_staledone_tgl = phys_dbg_staledone_tgl_d[0];
-assign phys_dbg_busycmd_tgl   = phys_dbg_busycmd_tgl_d[0];
-assign phys_dbg_fin_tgl       = phys_dbg_fin_tgl_d[0];
-assign phys_dbg_pres_cnt      = phys_dbg_pres_cnt_d[0];
+integer phys_sel;
+always_comb begin
+	phys_sel = 0;
+	for(int k=1; k<NDR; k=k+1) if(phys_mode[k]) phys_sel = k;
+end
+
+// phantom-free toggle re-encoders (see the CAUTION block above). The
+// initializers match fdc1772's zeroed toggles: in hardware the bitstream
+// zeroes them anyway, but without them 4-state simulation would lock the
+// out registers at X (they are only ever inverted).
+reg [N:0] p_step_req_prev = '0, p_rd_req_prev = '0, p_rd_cancel_prev = '0;
+reg [N:0] p_dbg_lost_prev = '0, p_dbg_drain_prev = '0, p_dbg_staledone_prev = '0;
+reg [N:0] p_dbg_busycmd_prev = '0, p_dbg_fin_prev = '0;
+reg p_step_req_out = 1'b0, p_rd_req_out = 1'b0, p_rd_cancel_out = 1'b0;
+reg p_dbg_lost_out = 1'b0, p_dbg_drain_out = 1'b0, p_dbg_staledone_out = 1'b0;
+reg p_dbg_busycmd_out = 1'b0, p_dbg_fin_out = 1'b0;
+always @(posedge clk) begin
+	for(int k=0; k<NDR; k=k+1) begin
+		if (phys_mode[k] && (phys_step_req_tgl_d[k]      != p_step_req_prev[k]))      p_step_req_out      <= ~p_step_req_out;
+		if (phys_mode[k] && (phys_rd_req_tgl_d[k]        != p_rd_req_prev[k]))        p_rd_req_out        <= ~p_rd_req_out;
+		if (phys_mode[k] && (phys_rd_cancel_tgl_d[k]     != p_rd_cancel_prev[k]))     p_rd_cancel_out     <= ~p_rd_cancel_out;
+		if (phys_mode[k] && (phys_dbg_lost_tgl_d[k]      != p_dbg_lost_prev[k]))      p_dbg_lost_out      <= ~p_dbg_lost_out;
+		if (phys_mode[k] && (phys_dbg_drain_tgl_d[k]     != p_dbg_drain_prev[k]))     p_dbg_drain_out     <= ~p_dbg_drain_out;
+		if (phys_mode[k] && (phys_dbg_staledone_tgl_d[k] != p_dbg_staledone_prev[k])) p_dbg_staledone_out <= ~p_dbg_staledone_out;
+		if (phys_mode[k] && (phys_dbg_busycmd_tgl_d[k]   != p_dbg_busycmd_prev[k]))   p_dbg_busycmd_out   <= ~p_dbg_busycmd_out;
+		if (phys_mode[k] && (phys_dbg_fin_tgl_d[k]       != p_dbg_fin_prev[k]))       p_dbg_fin_out       <= ~p_dbg_fin_out;
+		p_step_req_prev[k]      <= phys_step_req_tgl_d[k];
+		p_rd_req_prev[k]        <= phys_rd_req_tgl_d[k];
+		p_rd_cancel_prev[k]     <= phys_rd_cancel_tgl_d[k];
+		p_dbg_lost_prev[k]      <= phys_dbg_lost_tgl_d[k];
+		p_dbg_drain_prev[k]     <= phys_dbg_drain_tgl_d[k];
+		p_dbg_staledone_prev[k] <= phys_dbg_staledone_tgl_d[k];
+		p_dbg_busycmd_prev[k]   <= phys_dbg_busycmd_tgl_d[k];
+		p_dbg_fin_prev[k]       <= phys_dbg_fin_tgl_d[k];
+	end
+end
+
+assign phys_active        = phys_active_d[phys_sel];
+assign phys_cia_motor_on  = phys_cia_motor_on_d[phys_sel];
+assign phys_cia_side      = phys_cia_side_d[phys_sel];
+assign phys_step_req_tgl  = p_step_req_out;
+assign phys_step_outward  = phys_step_outward_d[phys_sel];
+assign phys_rd_req_tgl    = p_rd_req_out;
+assign phys_rd_op         = phys_rd_op_d[phys_sel];
+assign phys_rd_track      = phys_rd_track_d[phys_sel];
+assign phys_rd_side       = phys_rd_side_d[phys_sel];
+assign phys_rd_sector     = phys_rd_sector_d[phys_sel];
+assign phys_rd_cancel_tgl = p_rd_cancel_out;
+assign phys_rd_seq        = phys_rd_seq_d[phys_sel];
+assign phys_byte_ovf      = phys_byte_ovf_d[phys_sel];
+assign phys_byte_rd_en    = phys_byte_rd_en_d[phys_sel];
+assign phys_dbg_lost_tgl      = p_dbg_lost_out;
+assign phys_dbg_drain_tgl     = p_dbg_drain_out;
+assign phys_dbg_staledone_tgl = p_dbg_staledone_out;
+assign phys_dbg_busycmd_tgl   = p_dbg_busycmd_out;
+assign phys_dbg_fin_tgl       = p_dbg_fin_out;
+assign phys_dbg_pres_cnt      = phys_dbg_pres_cnt_d[phys_sel];
 
 generate
 	genvar i;
@@ -317,9 +377,14 @@ generate
 			.sd_buff_din(sd_buff_din[i]),
 			.sd_buff_wr(sd_buff_wr),
 
-			// MEGA65 (#90): physical 1581 ABI. Only drive 0 is the internal drive;
-			// other drives get phys inputs tied off and their outputs left unused.
-			.phys_mode        ( (i==0) ? phys_mode         : 1'b0 ),
+			// MEGA65 (#90/#93): physical 1581 ABI. The drive whose phys_mode bit is
+			// set is the internal drive; its outputs are selected by the phys_sel
+			// mux / toggle re-encoders above. The shared controller-driven inputs
+			// go to ALL drives UN-GATED (as the pre-#93 single-drive design did
+			// for drive 0): fdc1772 ignores them while its own phys_mode input is
+			// 0, and gating them here would make the observed toggle LEVELS jump
+			// when a drive enters or leaves phys mode -- a phantom edge.
+			.phys_mode        ( phys_mode[i] ),
 			.phys_active      ( phys_active_d[i]      ),
 			.phys_cia_motor_on( phys_cia_motor_on_d[i]),
 			.phys_cia_side    ( phys_cia_side_d[i]    ),
@@ -334,26 +399,26 @@ generate
 			.phys_rd_seq      ( phys_rd_seq_d[i]      ),
 			.phys_byte_ovf    ( phys_byte_ovf_d[i]    ),
 			.phys_byte_rd_en  ( phys_byte_rd_en_d[i]  ),
-			.phys_step_ack_tgl( (i==0) ? phys_step_ack_tgl : 1'b0 ),
-			.phys_rd_done_tgl ( (i==0) ? phys_rd_done_tgl  : 1'b0 ),
-			.phys_rd_done_seq ( (i==0) ? phys_rd_done_seq  : 2'd0 ),
-			.phys_rd_result   ( (i==0) ? phys_rd_result    : 5'd0 ),
-			.phys_rd_crc_err  ( (i==0) ? phys_rd_crc_err   : 1'b0 ),
-			.phys_rd_rnf      ( (i==0) ? phys_rd_rnf       : 1'b0 ),
-			.phys_rd_deleted  ( (i==0) ? phys_rd_deleted   : 1'b0 ),
-			.phys_rd_c        ( (i==0) ? phys_rd_c         : 8'd0 ),
-			.phys_rd_h        ( (i==0) ? phys_rd_h         : 8'd0 ),
-			.phys_rd_r        ( (i==0) ? phys_rd_r         : 8'd0 ),
-			.phys_rd_n        ( (i==0) ? phys_rd_n         : 8'd0 ),
-			.phys_byte_data   ( (i==0) ? phys_byte_data    : 8'd0 ),
-			.phys_byte_empty  ( (i==0) ? phys_byte_empty   : 1'b1 ),
-			.phys_media_ready ( (i==0) ? phys_media_ready  : 1'b0 ),
-			.phys_index       ( (i==0) ? phys_index        : 1'b0 ),
-			.phys_track0      ( (i==0) ? phys_track0       : 1'b0 ),
-			.phys_wprot       ( (i==0) ? phys_wprot        : 1'b0 ),
-			.phys_change      ( (i==0) ? phys_change       : 1'b0 ),
-			.phys_motor_on    ( (i==0) ? phys_motor_on     : 1'b0 ),
-			.phys_head_settled( (i==0) ? phys_head_settled : 1'b0 ),
+			.phys_step_ack_tgl( phys_step_ack_tgl ),
+			.phys_rd_done_tgl ( phys_rd_done_tgl ),
+			.phys_rd_done_seq ( phys_rd_done_seq ),
+			.phys_rd_result   ( phys_rd_result ),
+			.phys_rd_crc_err  ( phys_rd_crc_err ),
+			.phys_rd_rnf      ( phys_rd_rnf ),
+			.phys_rd_deleted  ( phys_rd_deleted ),
+			.phys_rd_c        ( phys_rd_c ),
+			.phys_rd_h        ( phys_rd_h ),
+			.phys_rd_r        ( phys_rd_r ),
+			.phys_rd_n        ( phys_rd_n ),
+			.phys_byte_data   ( phys_byte_data ),
+			.phys_byte_empty  ( phys_byte_empty ),
+			.phys_media_ready ( phys_media_ready ),
+			.phys_index       ( phys_index ),
+			.phys_track0      ( phys_track0 ),
+			.phys_wprot       ( phys_wprot ),
+			.phys_change      ( phys_change ),
+			.phys_motor_on    ( phys_motor_on ),
+			.phys_head_settled( phys_head_settled ),
 			.phys_dbg_lost_tgl     ( phys_dbg_lost_tgl_d[i]     ),
 			.phys_dbg_drain_tgl    ( phys_dbg_drain_tgl_d[i]    ),
 			.phys_dbg_staledone_tgl( phys_dbg_staledone_tgl_d[i]),
