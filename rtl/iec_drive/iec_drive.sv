@@ -149,9 +149,19 @@ wire  [N:0] c1581_sd_rd, c1581_sd_wr;
 // the CORE clock domain (clk = clk_main_i). Sampling them on the QNICE clock (clk_sys) was an
 // unsynchronized CDC: D64 survived it only because dtype powers up to 0 (= 1541), but a D81
 // (img_type=10) needs this latch to actually capture a non-zero value across the boundary.
-// Latch in the signals own domain instead. dtype is quasi-static (changes only on a mount),
-// so its use as the clk_sys-domain sd_lba/sd_rd mux select stays safe.
-always @(posedge clk) for(int i=0; i<NDR; i=i+1) if(img_mounted[i] && img_size) {dtype[1][i],dtype[0][i]} <= img_type;
+// Latch in the signals own domain instead. dtype is quasi-static (changes only on a mount or
+// unmount strobe), so its use as the clk_sys-domain sd_lba/sd_rd mux select stays safe.
+//
+// MEGA65 (#88/#93): an unmount strobe (img_mounted with img_size = 0, sent by the Shell when
+// the user unmounts and by vdrives after a reset-driven unmount) returns the drive to 00 =
+// 1541, the power-up value. Upstream only latched on mounts, so dtype kept the last mounted
+// type: with "Disk Image: Always" (the drive keeps running while unmounted) a drive that once
+// had a D81 mounted stayed an empty 1581 after the unmount, and programs that upload code into
+// the 1541 (the 4k intro "Boo" by Reflex, issue #88) found no 1541 until a D64 was mounted
+// again. The 1581 engine is live only while a D81 is mounted or in physical mode. The latch
+// stays level-sensitive: the strobe is held for many clk cycles while img_size/img_type
+// arrive through separate synchronizers, so the last strobe cycle wins with settled values.
+always @(posedge clk) for(int i=0; i<NDR; i=i+1) if(img_mounted[i]) {dtype[1][i],dtype[0][i]} <= (|img_size) ? img_type : 2'b00;
 
 assign led          = c1581_led      | c1541_led;     // MEGA65 (D81): 1581 engine enabled
 assign iec_data_o   = c1581_iec_data & c1541_iec_data;
@@ -228,9 +238,10 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 );
 
 
-// MEGA65 (D81 enable, sy2002): the 1581 engine is now active. Reset is released only when
-// drive 8 has a D81 mounted (dtype[1]=1); a D64 holds it in reset so only one engine drives
-// the IEC bus at a time (AND-wired, safe by construction -- a reset drive contributes '1').
+// MEGA65 (D81 enable, sy2002): the 1581 engine is now active. Reset is released only while
+// the drive has a D81 mounted (dtype[1]=1); a D64 or no image at all holds it in reset so only
+// one engine drives the IEC bus at a time (AND-wired, safe by construction -- a reset drive
+// contributes '1').
 // The stale signal names in the original commented block (rom_addr/rom_data/rom_wr/rom_std)
 // are corrected to the actual _i-suffixed ports; bit15 of rom_addr_i selects the 1581 ROM
 // window. iec_fclk_o and pwr_led are intentionally left unconnected (C64 has no fast serial).
