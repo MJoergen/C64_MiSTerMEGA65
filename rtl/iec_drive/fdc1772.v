@@ -173,6 +173,18 @@ wire        fd_doubleside;
 wire [4:0]  fd_spt;
 reg         data_transfer_start;
 reg         data_transfer_done;
+// MEGA65 (C64MEGA65 #248): image-mode Write Sector with real-WD1772 first-byte
+// semantics, see label4 (wait + grace) and label2 (abort). data_transfer_abort is a
+// label4 -> label2 strobe like data_transfer_done.
+reg         data_transfer_abort = 1'b0;
+reg         wr_first_wait       = 1'b0;   // data field deferred until the CPU loaded the data register
+reg   [5:0] wr_first_grace      = 6'd0;   // byte-times left of the first-byte allowance
+localparam  WR_FIRST_GRACE      = 6'd27;  // WD1772 (MFM): 22 byte-times from the ID-field CRC to the write-gate
+                                          // decision (the data AM follows 12 zero bytes and A1 A1 A1 FB later).
+                                          // The counter runs from the header START (floppy.v header = 6
+                                          // byte-times) and the abort fires on the byte clock that finds it at
+                                          // zero, i.e. on the 28th clock = 22 byte-times after the header end.
+reg         fd_hdr_d            = 1'b0;   // label2: fd_sector_hdr sampled at clk8m_en, for the header-start edge
 reg         sd_card_write;
 reg         sd_card_read;
 reg         cpu_rw_data;
@@ -483,8 +495,14 @@ always @(posedge clkcpu)
 
 // MEGA65 (#90 delivery v2): accepting a Type-I/II/III command in phys mode also
 // clears DRQ (phys_cmd_clear, 1 cycle) -- real-WD1772 command-start semantics.
-// In image mode phys_cmd_clear never pulses, so drq_clr is byte-identical.
-wire drq_clr = !floppy_reset || cpu_rw_data || phys_cmd_clear;
+// In image mode (C64MEGA65 #248) the acceptance of a Type-I/II/III command clears DRQ
+// as well, straight from cmd_rx -- the same event on which label4 clears LOST DATA. Now
+// that LOST DATA is sticky for the whole command, a DRQ left over from an aborted earlier
+// command must not be mistaken for a missed byte of the new one; the real chip clears
+// DRQ on command acceptance too. cmd_rx is low again two clkcpu cycles after BUSY rose,
+// the first drq_set of the new command comes at least one clk8m_en tick later.
+wire drq_clr = !floppy_reset || cpu_rw_data || phys_cmd_clear
+            || (!phys_mode && cmd_rx && !cmd_type_4);
 
 always @(posedge clkcpu) begin
 	if(drq_clr) drq <= 1'b0;
@@ -562,6 +580,15 @@ wire       fd_ready       = fd_any ? fdn_ready[fdn]       : 1'b0;
 wire [6:0] fd_track       = fd_any ? fdn_track[fdn]       : 7'd0;
 wire [4:0] fd_sector      = fd_any ? fdn_sector[fdn]      : 5'd0;
 wire       fd_sector_hdr  = fd_any ? fdn_sector_hdr[fdn]  : 1'b0;
+// MEGA65 (C64MEGA65 #248): a data phase may only start on a sector header that BEGINS
+// after the command was accepted -- the real chip has to see the whole ID field. Starting
+// on the header LEVEL let a command that arrived mid-header start at once, which gave the
+// drive CPU as little as one byte clock for the first byte of Read Address / Read Sector.
+// Used for Read Sector and Read Address. Write Sector keeps the level start: its data
+// field only begins once the CPU has loaded the first byte (wr_first_wait below), so a
+// command that arrives mid-header is safe either way, and waiting for the next header
+// would cost a revolution exactly in the timing window of issue #248.
+wire       fd_hdr_rise    = fd_sector_hdr & ~fd_hdr_d;
 //wire     fd_sector_data = fd_any ? fdn_sector_data[fdn] : 1'b0;
 wire       fd_dclk_en     = fd_any ? fdn_dclk[fdn]        : 1'b0;
 wire       fd_present     = fd_any ? fdn_present[fdn]     : 1'b0;
@@ -694,6 +721,7 @@ always @(posedge clkcpu) begin : label2
 		sd_card_read <= 0;
 		sd_card_write <= 0;
 		data_transfer_start <= 1'b0;
+		fd_hdr_d <= fd_sector_hdr;   // MEGA65 (C64MEGA65 #248): header-start edge, see fd_hdr_rise
 
 		// disable step signal after 1 msec
 		if(step_pulse_cnt != 0) 
@@ -996,7 +1024,7 @@ always @(posedge clkcpu) begin : label2
 								// we are busy until the right sector header passes under 
 								// the head and the sd-card controller indicates the sector
 								// is in the fifo
-								if(fd_ready && fd_sector_hdr && (fd_sector == sector)) data_transfer_start <= 1'b1;
+								if(fd_ready && fd_hdr_rise && (fd_sector == sector)) data_transfer_start <= 1'b1;   // MEGA65 (#248): header START
 
 								if(data_transfer_done) begin
 									data_transfer_state <= 2'b00;
@@ -1033,7 +1061,17 @@ always @(posedge clkcpu) begin : label2
 							2'b10: begin
 								// CPU phase
 								if (fifo_cpuptr == 0 && fd_ready && fd_sector_hdr && (fd_sector == sector)) data_transfer_start <= 1'b1;
-								if (data_transfer_done) begin
+								// MEGA65 (C64MEGA65 #248): the CPU did not load the first byte within
+								// the allowance (label4): terminate like the real WD1772 -- LOST DATA
+								// (sticky, set by label4), nothing written, no multi-sector
+								// continuation, interrupt as for every command end. Checked before
+								// data_transfer_done so that the two can never both act in one tick.
+								if (data_transfer_abort) begin
+									data_transfer_state <= 2'b00;
+									busy <= 1'b0;
+									irq_set <= 1'b1;
+								end
+								else if (data_transfer_done) begin
 									sd_card_write <= 1;
 									sd_io_idle <= 1'b0;   // MEGA65: mark SD busy in the same cycle (race-free)
 									data_transfer_state <= 2'b11;
@@ -1108,7 +1146,7 @@ always @(posedge clkcpu) begin : label2
 					// read address
 					if(cmd[7:4] == 4'b1100) begin
 						// we are busy until the next setor header passes under the head
-						if(fd_ready && fd_sector_hdr)
+						if(fd_ready && fd_hdr_rise)   // MEGA65 (#248): header START, see fd_hdr_rise
 							data_transfer_start <= 1'b1;
 
 						if(data_transfer_done) begin
@@ -1479,6 +1517,7 @@ always @(posedge clkcpu) begin : label4
 		data_in_valid <= 0;
 		data_transfer_cnt <= 0;
 		fifo_cpuptr <= 0;
+		wr_first_wait <= 1'b0;      // MEGA65 (C64MEGA65 #248): abandon a pending first-byte wait
 	end
 
 	drq_set <= 1'b0;
@@ -1550,6 +1589,7 @@ always @(posedge clkcpu) begin : label4
 		phys_draining <= 1'b0;
 
 	if (clk8m_en) data_transfer_done <= 0;
+	if (clk8m_en) data_transfer_abort <= 1'b0;   // MEGA65 (C64MEGA65 #248): same lifetime as data_transfer_done
 	data_transfer_startD <= data_transfer_start;
 	// received request to read data
 	if(~data_transfer_startD & data_transfer_start) begin
@@ -1560,12 +1600,34 @@ always @(posedge clkcpu) begin : label4
 			data_transfer_cnt <= 11'd6+11'd1;
 		end
 
-		// read/write sector has SECTOR_SIZE data bytes
-		if(cmd[7:6] == 2'b10)
+		// read sector has SECTOR_SIZE data bytes, starting at the next byte clock
+		if(cmd[7:5] == 3'b100)
 			data_transfer_cnt <= SECTOR_SIZE + 1'd1;
 
 		// write sector asserts drq earlier to fill up the data register in time
-		if(cmd[7:5] == 3'b101) drq_set <= !data_in_valid;
+		//
+		// MEGA65 (C64MEGA65 #248): image mode follows the real WD1772 here. The chip
+		// raises DRQ after the ID field and then counts off the gap (22 byte-times at
+		// MFM) before the data field starts; if the CPU has not loaded the data
+		// register by then, the command terminates with LOST DATA and nothing is
+		// written. Upstream started the disk-paced data field at the very next byte
+		// clock (0..32 us after DRQ) and strobed whatever the data register held, so
+		// a drive CPU that was a few microseconds late (the 1581 DOS needs ~37 us
+		// from the command write to its first data write) got its sector shifted by
+		// one byte under a clean status -- the 1581 track-cache write-back then
+		// silently dropped the rest of the track side. The data field now starts
+		// with the byte clock after the data register was loaded (label4 below).
+		// phys_mode keeps the upstream expression (its write path is a separate,
+		// still read-only milestone).
+		if(cmd[7:5] == 3'b101) begin
+			drq_set <= !data_in_valid;
+			if (phys_mode) data_transfer_cnt <= SECTOR_SIZE + 1'd1;
+			else begin
+				data_transfer_cnt <= 11'd0;   // no older transfer may overlap the wait
+				wr_first_wait     <= 1'b1;
+				wr_first_grace    <= WR_FIRST_GRACE;
+			end
+		end
 	end
 
 	// advance fifo pointer when the write sector data consumed
@@ -1573,10 +1635,23 @@ always @(posedge clkcpu) begin : label4
 	if(cmd[7:5] == 3'b101 && data_in_strobe) fifo_cpuptr <= fifo_cpuptr + 1'd1;
 
 	if(fd_dclk_en) begin
+		// MEGA65 (C64MEGA65 #248): image-mode write sector, waiting for the first byte
+		if (wr_first_wait && !cmd_rx) begin
+			if (data_in_valid) begin
+				// data register loaded: the data field starts with the next byte clock
+				wr_first_wait     <= 1'b0;
+				data_transfer_cnt <= SECTOR_SIZE + 1'd1;
+			end else if (wr_first_grace == 0) begin
+				// allowance elapsed without a byte: terminate like the real chip (label2)
+				wr_first_wait       <= 1'b0;
+				data_lost           <= 1'b1;
+				data_transfer_abort <= 1'b1;
+			end else
+				wr_first_grace <= wr_first_grace - 1'd1;
+		end
 		if(data_transfer_cnt != 0) begin
 			if(data_transfer_cnt != 1) begin
-				data_lost <= 1'b0;
-				if (drq) data_lost <= 1'b1;
+				if (drq) data_lost <= 1'b1;   // MEGA65 (C64MEGA65 #248): sticky, see the cmd_rx clear below
 				// raise drq, except when the last byte is already taken from the CPU for write
 				if (cmd[7:5] != 3'b101 || data_transfer_cnt != 2) drq_set <= 1'b1;
 
@@ -1610,6 +1685,20 @@ always @(posedge clkcpu) begin : label4
 			if(data_transfer_cnt == 1)
 				data_transfer_done <= 1'b1;
 		end
+	end
+
+	// MEGA65 (C64MEGA65 #248): LOST DATA is a per-command flag on the real chip: cleared
+	// when a Type-I/II/III command is accepted, then STICKY until the next command (it used
+	// to be rewritten on every byte clock, so a slip early in a sector read back clean).
+	// Force Interrupt leaves it untouched, as on the real chip. Placed after the byte-clock
+	// block so that a command accepted in the same cycle starts clean.
+	if (cmd_rx && !cmd_type_4) data_lost <= 1'b0;
+
+	// MEGA65 (C64MEGA65 #248): reset term for the first-byte state (last assignment wins)
+	if (!floppy_reset) begin
+		wr_first_wait       <= 1'b0;
+		data_transfer_abort <= 1'b0;
+		data_lost           <= 1'b0;
 	end
 end
 
