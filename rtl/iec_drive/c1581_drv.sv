@@ -101,6 +101,19 @@ module c1581_drv
 	input         phys_motor_on,
 	input         phys_head_settled,
 
+	// MEGA65 (#244): physical write path, 1:1 pass-through of fdc1772. The
+	// request itself rides on phys_rd_req_tgl/phys_rd_op (100 / 101); the bytes
+	// go through the external write FIFO (full/level native drive clock).
+	output        phys_wr_deleted,   // quasi-static with phys_rd_req_tgl
+	output        phys_wr_precomp,   // quasi-static with phys_rd_req_tgl
+	output        phys_wr_byte_wr,   // write-FIFO push strobe (one clk)
+	output  [7:0] phys_wr_byte_data,
+	input         phys_wr_fifo_full,
+	input   [2:0] phys_wr_fifo_level,
+	input         phys_wr_feed,      // 50 MHz level (synced inside fdc1772)
+	input         phys_wr_lost,      // 50 MHz level (synced inside fdc1772)
+	input         phys_wr_busy,      // 50 MHz level (synced inside fdc1772)
+
 	// fdc1772 diagnostic event toggles + per-op presented-byte count (drive
 	// clock; 2-FF-synced and counted in the QNICE diag device upstream)
 	output        phys_dbg_lost_tgl,
@@ -108,7 +121,10 @@ module c1581_drv
 	output        phys_dbg_staledone_tgl,
 	output        phys_dbg_busycmd_tgl,
 	output        phys_dbg_fin_tgl,
-	output [10:0] phys_dbg_pres_cnt
+	output [10:0] phys_dbg_pres_cnt,
+	output        phys_dbg_wr_fin_tgl,   // #244 write diagnostics (toggles)
+	output        phys_dbg_wr_wp_tgl,
+	output        phys_dbg_wr_drop_tgl
 );
 
 wire [23:0] cpu_a;
@@ -386,12 +402,26 @@ fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 	.phys_motor_on(phys_motor_on),
 	.phys_head_settled(phys_head_settled),
 
+	// MEGA65 (#244): physical write path
+	.phys_wr_deleted(phys_wr_deleted),
+	.phys_wr_precomp(phys_wr_precomp),
+	.phys_wr_byte_wr(phys_wr_byte_wr),
+	.phys_wr_byte_data(phys_wr_byte_data),
+	.phys_wr_fifo_full(phys_wr_fifo_full),
+	.phys_wr_fifo_level(phys_wr_fifo_level),
+	.phys_wr_feed(phys_wr_feed),
+	.phys_wr_lost(phys_wr_lost),
+	.phys_wr_busy(phys_wr_busy),
+
 	.phys_dbg_lost_tgl(phys_dbg_lost_tgl),
 	.phys_dbg_drain_tgl(phys_dbg_drain_tgl),
 	.phys_dbg_staledone_tgl(phys_dbg_staledone_tgl),
 	.phys_dbg_busycmd_tgl(phys_dbg_busycmd_tgl),
 	.phys_dbg_fin_tgl(phys_dbg_fin_tgl),
-	.phys_dbg_pres_cnt(phys_dbg_pres_cnt)
+	.phys_dbg_pres_cnt(phys_dbg_pres_cnt),
+	.phys_dbg_wr_fin_tgl(phys_dbg_wr_fin_tgl),
+	.phys_dbg_wr_wp_tgl(phys_dbg_wr_wp_tgl),
+	.phys_dbg_wr_drop_tgl(phys_dbg_wr_drop_tgl)
 );
 
 endmodule

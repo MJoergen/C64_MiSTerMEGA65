@@ -108,6 +108,21 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input         phys_motor_on,
 	input         phys_head_settled,
 
+	// MEGA65 (#244): physical write path (Write Sector / Write Track). The
+	// request rides on phys_rd_req_tgl/phys_rd_op (100 / 101). phys_wr_byte_*
+	// is the write side of the external write FIFO and runs on this module's
+	// clk (the drive clock), as do phys_wr_fifo_full/level (no sync).
+	// phys_wr_feed/lost/busy are 50 MHz levels, 2-FF synced inside fdc1772.
+	output        phys_wr_deleted,   // quasi-static with phys_rd_req_tgl: DAM F8
+	output        phys_wr_precomp,   // quasi-static with phys_rd_req_tgl: precomp on
+	output        phys_wr_byte_wr,   // write-FIFO push strobe (one clk)
+	output  [7:0] phys_wr_byte_data,
+	input         phys_wr_fifo_full,
+	input   [2:0] phys_wr_fifo_level,
+	input         phys_wr_feed,
+	input         phys_wr_lost,
+	input         phys_wr_busy,
+
 	// fdc1772 diagnostic event toggles + per-op presented-byte count (drive
 	// clock; main.vhd 2-FF-syncs the toggles into the 50 MHz diag domain,
 	// pres_cnt crosses unsynced as a quasi-static bus captured on the fin edge)
@@ -116,7 +131,10 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	output        phys_dbg_staledone_tgl,
 	output        phys_dbg_busycmd_tgl,
 	output        phys_dbg_fin_tgl,
-	output [10:0] phys_dbg_pres_cnt
+	output [10:0] phys_dbg_pres_cnt,
+	output        phys_dbg_wr_fin_tgl,   // #244: a physical write op finalized
+	output        phys_dbg_wr_wp_tgl,    // #244: a write refused by the WP pre-check
+	output        phys_dbg_wr_drop_tgl   // #244: a data-register write was dropped
 );
 
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
@@ -327,11 +345,23 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.phys_change(phys_change),
 	.phys_motor_on(phys_motor_on),
 	.phys_head_settled(phys_head_settled),
+	.phys_wr_deleted(phys_wr_deleted),
+	.phys_wr_precomp(phys_wr_precomp),
+	.phys_wr_byte_wr(phys_wr_byte_wr),
+	.phys_wr_byte_data(phys_wr_byte_data),
+	.phys_wr_fifo_full(phys_wr_fifo_full),
+	.phys_wr_fifo_level(phys_wr_fifo_level),
+	.phys_wr_feed(phys_wr_feed),
+	.phys_wr_lost(phys_wr_lost),
+	.phys_wr_busy(phys_wr_busy),
 	.phys_dbg_lost_tgl(phys_dbg_lost_tgl),
 	.phys_dbg_drain_tgl(phys_dbg_drain_tgl),
 	.phys_dbg_staledone_tgl(phys_dbg_staledone_tgl),
 	.phys_dbg_busycmd_tgl(phys_dbg_busycmd_tgl),
 	.phys_dbg_fin_tgl(phys_dbg_fin_tgl),
-	.phys_dbg_pres_cnt(phys_dbg_pres_cnt)
+	.phys_dbg_pres_cnt(phys_dbg_pres_cnt),
+	.phys_dbg_wr_fin_tgl(phys_dbg_wr_fin_tgl),
+	.phys_dbg_wr_wp_tgl(phys_dbg_wr_wp_tgl),
+	.phys_dbg_wr_drop_tgl(phys_dbg_wr_drop_tgl)
 );
 endmodule

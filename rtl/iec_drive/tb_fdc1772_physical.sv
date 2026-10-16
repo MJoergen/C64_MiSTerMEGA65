@@ -67,6 +67,58 @@
 //       that becomes due on the following clk8m tick. No swallowed DRQ and no
 //       false LOST DATA are permitted.
 //
+// Physical WRITE (issue #244, milestone M2). The mock backend additionally
+// models the controller's write engine (spec 5.3/5.4): it accepts ops 100
+// (Write Sector) / 101 (Write Track), pops the bytes from an SV port of the
+// 4-deep write Gray FIFO (physical_1581_wfifo: write side clkcpu, read side
+// clk_be), raises feed / lost / busy levels and completes with the accepted
+// tag. Bench time scale: the drive CPU is modelled at one 6502 cycle = one
+// 16-clkcpu T65 bus cycle = 0.96 us (the bench clkcpu is ~16.6 MHz, half the
+// hardware clock), so the backend's write byte-time WRB is 64 such cycles
+// (61.44 us): the CPU-to-disk ratio of the hardware (64 cycles of 0.5 us per
+// 32 us byte) is kept exactly, which is what the ROM loops' margins depend on.
+// The WD's own timers (PHYS_T1_MIN_TICKS) run at the bench clk8m (~1.44 ms).
+// T65 write accesses are modelled as on hardware: the select is up for the
+// whole 16-clkcpu cycle and R/W is low only in its last clkcpu (ph2_f).
+//   (14) Write Sector with the ROM idiom: $CBF4 command writer (wait-busy-SET
+//       seen within 3 polls), the $C667 loop (busy first, DRQ second, one
+//       STA per DRQ, 2 pages), the $CD3F epilogue: status bits 6/4/3/2
+//       clear, the 512 popped bytes equal the bytes written, in order; then
+//       a second, back-to-back Write Sector (sector+1 via INC $6002) the way
+//       the side flush issues it;
+//   (15) FIFO-room DRQ: a CPU that writes the moment DRQ is seen never has
+//       more bytes outstanding than the FIFO depth (4), DRQ is never high
+//       while the FIFO is full, no push strobe is ever issued into a full
+//       FIFO, and the op is byte-exact;
+//   (16) first-byte abort: the CPU never writes -> RES_LOST_DATA, status bit 2
+//       alone, no byte popped, busy drops (no hang);
+//   (17) LOST DATA sticky: the CPU stalls > 4 byte-times mid-sector -> the
+//       lost level -> status bit 2 at completion, the op still completes
+//       with 512 slots (00 in the starved slot, the late bytes shifted), the
+//       next op is clean;
+//   (18) WP pre-check: phys_wprot = 1 -> status bit 6 alone, no request
+//       toggle, BUSY held >= the minimum busy time and seen by the $CBF4
+//       idiom, INTRQ, no hang; a controller-side RES_WRITE_PROTECTED that
+//       arrives together with rnf+crc still shows bit 6 ALONE and is held
+//       for the minimum busy time; then a normal write succeeds;
+//   (19) Force Interrupt mid-write: the backend sees the cancel, the
+//       cancelled op's late done is ignored by tag, DRQ is off, BUSY drops at
+//       once, the next op is clean;
+//   (20) busy outlives the writer: the backend toggles done while its writer
+//       busy level is still high -> BUSY stays set until the level falls;
+//       (23) is folded in: a non-FI command written during this write op is
+//       ignored (busycmd diag, no request, op completes byte-exact);
+//   (21) m = 1 Write Sector: sectors 9 and 10 are written with fresh tags
+//       (sector_inc + reissue), sector 11 ends the command with RNF alone;
+//   (22) Write Track: DRQ right after feed, tokens popped in order with the
+//       F7 double slot as a 2-byte-time pause, the stream ends at the
+//       modelled index, status clean;
+//   (24) continuous monitors over all groups: CRC and RNF never together;
+//       DRQ never high on a write op while the synced feed is 0 (and never
+//       more than 8 clkcpu after the raw feed fell); no push strobe into a
+//       full FIFO; DRQ never high while the FIFO is full; no write-FIFO
+//       residue is ever left behind at an op boundary.
+//
 // Run:
 //   iverilog -g2012 -o tb.vvp tb_fdc1772_physical.sv fdc1772.v iecdrv_misc.sv
 //   vvp tb.vvp        (nonzero exit / $fatal on any mismatch)
@@ -159,6 +211,67 @@ module tb_rdfifo #(parameter AW = 10) (
 endmodule
 
 // ---------------------------------------------------------------------------
+// #244: Gray-code async FWFT write FIFO -- SV port of physical_1581_wfifo
+// (G_AW = 2: 4 entries). Write side native clkcpu (the drive), read side
+// clk_be (the controller); full and wr_level are computed in the write domain
+// (wr_level is conservative-high: it uses the 2-FF-synced read pointer).
+// ---------------------------------------------------------------------------
+module tb_wfifo #(parameter AW = 2) (
+	input            wr_clk, input wr_rst, input wr_en, input [7:0] wr_data,
+	output           wr_full, output [AW:0] wr_level,
+	input            rd_clk, input rd_rst, input rd_en, output [7:0] rd_data,
+	output           rd_empty, output [AW:0] rd_level
+);
+	function [AW:0] b2g(input [AW:0] b); b2g = (b >> 1) ^ b; endfunction
+	function [AW:0] g2b(input [AW:0] g);
+		integer i;
+		begin
+			g2b[AW] = g[AW];
+			for (i = AW - 1; i >= 0; i = i - 1) g2b[i] = g2b[i + 1] ^ g[i];
+		end
+	endfunction
+
+	reg  [7:0]  mem [0:(1<<AW)-1];
+	reg  [AW:0] wbin=0, wgray=0, rbin=0, rgray=0;
+	reg  [AW:0] rq1_wg=0, rq2_wg=0, wq1_rg=0, wq2_rg=0;
+	reg         full_q=0, empty_q=1;
+
+	wire        wdo     = wr_en & ~full_q;
+	wire [AW:0] wbin_n  = wbin + (wdo ? 1'b1 : 1'b0);
+	wire [AW:0] wgray_n = b2g(wbin_n);
+	wire        rdo     = rd_en & ~empty_q;
+	wire [AW:0] rbin_n  = rbin + (rdo ? 1'b1 : 1'b0);
+	wire [AW:0] rgray_n = b2g(rbin_n);
+
+	assign wr_full  = full_q;
+	assign wr_level = wbin - g2b(wq2_rg);
+	assign rd_empty = empty_q;
+	assign rd_data  = mem[rbin[AW-1:0]];
+	assign rd_level = g2b(rq2_wg) - rbin;
+
+	always @(posedge wr_clk) begin
+		if (wr_rst) begin wq1_rg<=0; wq2_rg<=0; wbin<=0; wgray<=0; full_q<=0; end
+		else begin
+			wq1_rg <= rgray; wq2_rg <= wq1_rg;
+			if (wdo) mem[wbin[AW-1:0]] <= wr_data;
+			wbin  <= wbin_n;
+			wgray <= wgray_n;
+			full_q <= (wgray_n == {~wq2_rg[AW], ~wq2_rg[AW-1], wq2_rg[AW-2:0]});
+		end
+	end
+
+	always @(posedge rd_clk) begin
+		if (rd_rst) begin rq1_wg<=0; rq2_wg<=0; rbin<=0; rgray<=0; empty_q<=1; end
+		else begin
+			rq1_wg <= wgray; rq2_wg <= rq1_wg;
+			rbin  <= rbin_n;
+			rgray <= rgray_n;
+			empty_q <= (rgray_n == rq2_wg);
+		end
+	end
+endmodule
+
+// ---------------------------------------------------------------------------
 module tb_fdc1772_physical;
 
 	localparam [2:0] RDOP_READ_SECTOR  = 3'b000;
@@ -166,6 +279,18 @@ module tb_fdc1772_physical;
 	localparam [2:0] RDOP_VERIFY       = 3'b010;
 	localparam [4:0] RES_OK            = 5'b00000;
 	localparam [4:0] RES_CANCELLED     = 5'b00111;
+	// #244 write vocabulary (physical_1581_pkg.vhd values)
+	localparam [2:0] WROP_WRITE_SECTOR = 3'b100;
+	localparam [2:0] WROP_WRITE_TRACK  = 3'b101;
+	localparam [4:0] PRES_OK               = 5'b00000;
+	localparam [4:0] PRES_NO_INDEX         = 5'b00010;
+	localparam [4:0] PRES_RECORD_NOT_FOUND = 5'b00100;
+	localparam [4:0] PRES_WRITE_PROTECTED  = 5'b01001;
+	localparam [4:0] PRES_LOST_DATA        = 5'b01011;
+	localparam [4:0] PRES_CANCELLED        = 5'b01101;
+	// one write byte-time in clk_be cycles (see the header: 64 bench CPU cycles)
+	localparam integer WRB = 3072;
+	localparam integer CYC = 16;      // clkcpu per modelled 6502 cycle
 
 	localparam [1:0] REG_CMDSTATUS = 2'd0;
 	localparam [1:0] REG_TRACK     = 2'd1;
@@ -246,6 +371,17 @@ module tb_fdc1772_physical;
 	reg        phys_media_ready = 0, phys_index = 0, phys_track0 = 0;
 	reg        phys_wprot = 0, phys_change = 0, phys_motor_on = 0, phys_head_settled = 0;
 
+	// #244 phys write ABI
+	wire       phys_wr_deleted, phys_wr_precomp, phys_wr_byte_wr;
+	wire [7:0] phys_wr_byte_data;
+	wire       wf_wr_full;
+	wire [2:0] wf_wr_level, wf_rd_level;
+	wire [7:0] wf_rd_data;
+	wire       wf_rd_empty;
+	reg        wf_rd_en = 0;
+	reg        phys_wr_feed = 0, phys_wr_lost = 0, phys_wr_busy = 0;
+	wire       phys_dbg_wr_fin_tgl, phys_dbg_wr_wp_tgl, phys_dbg_wr_drop_tgl;
+
 	// diagnostics
 	wire        phys_dbg_lost_tgl, phys_dbg_drain_tgl, phys_dbg_staledone_tgl;
 	wire        phys_dbg_busycmd_tgl, phys_dbg_fin_tgl;
@@ -297,12 +433,28 @@ module tb_fdc1772_physical;
 		.phys_change(phys_change), .phys_motor_on(phys_motor_on),
 		.phys_head_settled(phys_head_settled),
 
+		.phys_wr_deleted(phys_wr_deleted), .phys_wr_precomp(phys_wr_precomp),
+		.phys_wr_byte_wr(phys_wr_byte_wr), .phys_wr_byte_data(phys_wr_byte_data),
+		.phys_wr_fifo_full(wf_wr_full), .phys_wr_fifo_level(wf_wr_level),
+		.phys_wr_feed(phys_wr_feed), .phys_wr_lost(phys_wr_lost), .phys_wr_busy(phys_wr_busy),
+
 		.phys_dbg_lost_tgl(phys_dbg_lost_tgl),
 		.phys_dbg_drain_tgl(phys_dbg_drain_tgl),
 		.phys_dbg_staledone_tgl(phys_dbg_staledone_tgl),
 		.phys_dbg_busycmd_tgl(phys_dbg_busycmd_tgl),
 		.phys_dbg_fin_tgl(phys_dbg_fin_tgl),
-		.phys_dbg_pres_cnt(phys_dbg_pres_cnt)
+		.phys_dbg_pres_cnt(phys_dbg_pres_cnt),
+		.phys_dbg_wr_fin_tgl(phys_dbg_wr_fin_tgl),
+		.phys_dbg_wr_wp_tgl(phys_dbg_wr_wp_tgl),
+		.phys_dbg_wr_drop_tgl(phys_dbg_wr_drop_tgl)
+	);
+
+	// #244: the production write FIFO geometry (physical_1581_wfifo G_AW = 2)
+	tb_wfifo #(.AW(2)) wfifo (
+		.wr_clk(clkcpu), .wr_rst(~floppy_reset), .wr_en(phys_wr_byte_wr),
+		.wr_data(phys_wr_byte_data), .wr_full(wf_wr_full), .wr_level(wf_wr_level),
+		.rd_clk(clk_be), .rd_rst(~floppy_reset), .rd_en(wf_rd_en),
+		.rd_data(wf_rd_data), .rd_empty(wf_rd_empty), .rd_level(wf_rd_level)
 	);
 
 	// Match production exactly: one complete 512-byte sector is the quarantine
@@ -330,6 +482,82 @@ module tb_fdc1772_physical;
 		if (phys_dbg_staledone_tgl ^ d_stale) cnt_stale   = cnt_stale + 1;
 		if (phys_dbg_busycmd_tgl ^ d_busycmd) cnt_busycmd = cnt_busycmd + 1;
 		if (phys_dbg_fin_tgl     ^ d_fin)     cnt_fin     = cnt_fin + 1;
+	end
+
+	// -----------------------------------------------------------------------
+	// #244 write-path diagnostics and continuous monitors (24)
+	// -----------------------------------------------------------------------
+	integer cnt_wr_fin = 0, cnt_wr_wp = 0, cnt_wr_drop = 0;
+	reg d_wr_fin = 0, d_wr_wp = 0, d_wr_drop = 0;
+	integer w_pushes = 0;            // push strobes seen at the FIFO (all ops)
+	integer w_pops   = 0;            // FIFO pops by the backend (all ops, incl. drains)
+	integer w_lead_max = 0;          // max (pushes - pops) observed (FIFO occupancy)
+	integer viol_drq_full = 0, viol_push_full = 0, viol_drq_feed = 0, viol_drq_feedraw = 0;
+	integer feed_low_cyc = 1000;
+	time    t_drq_rise = 0, t_feed_rise = 0;
+	reg     drq_d = 0, feed_cd = 0, drq_since_push = 0;
+	integer lat_n = 0;               // DRQ-rise -> push latencies (ns), over the measured window
+	time    lat_min = 0, lat_max = 0, lat_first = 0;
+	reg     lat_on = 0;              // stimulus: measure DRQ -> data latencies
+	reg     lat_first_pending = 0;
+	time    t_feed_to_drq = 0;       // last feed_c rise -> first DRQ rise
+	reg     feed_drq_pending = 0;
+	always @(posedge clkcpu) begin
+		d_wr_fin  <= phys_dbg_wr_fin_tgl;
+		d_wr_wp   <= phys_dbg_wr_wp_tgl;
+		d_wr_drop <= phys_dbg_wr_drop_tgl;
+		if (phys_dbg_wr_fin_tgl  ^ d_wr_fin)  cnt_wr_fin  = cnt_wr_fin + 1;
+		if (phys_dbg_wr_wp_tgl   ^ d_wr_wp)   cnt_wr_wp   = cnt_wr_wp + 1;
+		if (phys_dbg_wr_drop_tgl ^ d_wr_drop) cnt_wr_drop = cnt_wr_drop + 1;
+
+		// DRQ is never high while the write FIFO is full; a push strobe never
+		// lands in a full FIFO
+		if (drq === 1'b1 && wf_wr_full === 1'b1 && dut.phys_wr_op) begin
+			viol_drq_full = viol_drq_full + 1;
+			if (viol_drq_full < 5) $display("FAIL: DRQ high while the write FIFO is full @%0t", $time);
+		end
+		if (phys_wr_byte_wr === 1'b1 && wf_wr_full === 1'b1) begin
+			viol_push_full = viol_push_full + 1;
+			if (viol_push_full < 5) $display("FAIL: write push strobe into a full FIFO @%0t", $time);
+		end
+		// DRQ never high on a write op while feed is 0: against the synced level
+		// (allowing the one clkcpu of the DRQ register itself), and against the
+		// raw level with an 8-clkcpu CDC allowance
+		if (phys_wr_feed) feed_low_cyc = 0; else if (feed_low_cyc < 1000) feed_low_cyc = feed_low_cyc + 1;
+		if (drq === 1'b1 && dut.phys_wr_op && !dut.phys_wr_feed_c && !feed_cd) begin
+			viol_drq_feed = viol_drq_feed + 1;
+			if (viol_drq_feed < 5) $display("FAIL: DRQ high on a write op with feed_c = 0 @%0t", $time);
+		end
+		if (drq === 1'b1 && dut.phys_wr_op && feed_low_cyc > 8) begin
+			viol_drq_feedraw = viol_drq_feedraw + 1;
+			if (viol_drq_feedraw < 5) $display("FAIL: DRQ high on a write op > 8 clkcpu after feed fell @%0t", $time);
+		end
+
+		// occupancy / lead accounting (pops are counted in the clk_be backend)
+		if (phys_wr_byte_wr === 1'b1) begin
+			w_pushes = w_pushes + 1;
+			if (w_pushes - w_pops > w_lead_max) w_lead_max = w_pushes - w_pops;
+		end
+
+		// DRQ rise -> data-register push latency (the DOS's DRQ margin)
+		drq_d   <= drq;
+		feed_cd <= dut.phys_wr_feed_c;
+		if (dut.phys_wr_feed_c && !feed_cd) begin t_feed_rise = $time; feed_drq_pending = 1; end
+		if (drq && !drq_d) begin
+			t_drq_rise = $time; drq_since_push = 1;
+			if (feed_drq_pending) begin t_feed_to_drq = $time - t_feed_rise; feed_drq_pending = 0; end
+		end
+		if (phys_wr_byte_wr === 1'b1 && drq_since_push) begin
+			drq_since_push = 0;
+			if (lat_on) begin
+				if (lat_first_pending) begin lat_first = $time - t_drq_rise; lat_first_pending = 0; end
+				else begin
+					if (lat_n == 0 || $time - t_drq_rise < lat_min) lat_min = $time - t_drq_rise;
+					if (lat_n == 0 || $time - t_drq_rise > lat_max) lat_max = $time - t_drq_rise;
+					lat_n = lat_n + 1;
+				end
+			end
+		end
 	end
 
 	// -----------------------------------------------------------------------
@@ -423,6 +651,55 @@ module tb_fdc1772_physical;
 	reg [15:0] be_racrc = 0;
 	reg [7:0]  ra_c = 8'h03, ra_h = 8'h00, ra_r = 8'h01, ra_n = 8'h02;
 
+	// #244 write engine: knobs and state (clk_be)
+	reg        be_wprot = 0;            // stimulus: the tab level the backend reports (phys_wprot)
+	reg        wr_force_wp = 0;         // stimulus: next write op completes RES_WRITE_PROTECTED
+	                                    //           with rnf+crc set, immediately (purity/min-busy belt)
+	reg [31:0] wr_search_dly = WRB;     // clk_be cycles from acceptance to "ID found" (feed rise)
+	reg [7:0]  wr_rnf_above = 8'd10;    // sector > this -> RNF after the search (search budget)
+	reg [31:0] wr_busy_extra = 0;       // stimulus (20): done while the writer busy stays up this long
+	reg [15:0] wr_trk_lead = 16'd4;     // byte-times from acceptance to the starting index
+	reg [15:0] wr_trk_len  = 16'd200;   // byte-times from the starting to the ending index
+	reg        wr_trk_noidx = 0;        // stimulus: no starting index -> RES_NO_INDEX (+rnf)
+	reg        be_session = 0;          // writer session (WGATE) of the model
+	reg        be_session_seen = 0;     // the session opened at least once since the tb cleared it
+	reg [31:0] be_wtick = 0;            // clk_be cycles left in the current byte-time
+	reg [15:0] be_wn = 0;               // byte-time / slot counter
+	reg [10:0] be_widx = 0;             // data slot index (0..512)
+	reg        be_wpause = 0;           // F7: the CRC-lo slot of a Write Track
+	reg [31:0] be_wbusy_hold = 0;       // writer busy tail (clk_be cycles)
+	reg [7:0]  be_wsec = 0, be_wtrk = 0;
+	reg        be_wop = 0;              // a write op is running in the model
+	reg        be_deleted_s = 0, be_precomp_s = 0;   // payload sampled at acceptance
+	reg  [4:0] be_tres = 0;             // termination: result / flags for the done of W_TAIL
+	reg        be_trnf = 0, be_tcrc = 0;
+	reg  [7:0] be_wguard = 0;           // W_TAIL: >= 16 clk_be between feed off and the drain
+	integer    wresidue_cnt = 0;        // bytes found in the FIFO while idle (must stay 0)
+	reg [7:0]  wpop [0:8191];           // slots written by the CURRENT op (00 = starved slot)
+	integer    wpop_cnt = 0;
+	reg [7:0]  wall [0:8191];           // slots written by all write ops since the tb cleared it
+	integer    wall_cnt = 0;
+	integer    wdrain_cnt = 0;          // bytes drained unwritten (late bytes, residue)
+	integer    be_wcancel_edges = 0;    // cancel edges seen while a write op ran
+	integer    be_wops = 0;             // write ops accepted
+	reg [7:0]  wsec_log [0:15];         // sector of each accepted write op (cyclic)
+	reg [1:0]  wseq_log [0:15];         // tag of each accepted write op (cyclic)
+	time       t_be_wdone = 0;          // last write done toggle
+	time       t_be_busy_fall = 0;      // last fall of the writer busy level
+	wire       be_can_edge = be_cancel_s ^ be_cancel_sd;
+
+	task be_wdone(input [1:0] seq, input [4:0] res, input rnf, input crcerr);
+	begin
+		phys_rd_result   <= res;
+		phys_rd_rnf      <= rnf;
+		phys_rd_crc_err  <= crcerr;
+		phys_rd_deleted  <= 1'b0;
+		phys_rd_done_seq <= seq;
+		phys_rd_done_tgl <= ~phys_rd_done_tgl;
+		t_be_wdone = $time;
+	end
+	endtask
+
 	// backend done helper values are driven quasi-static BEFORE the done
 	// toggle flips (registered one clk_be earlier than the toggle would be
 	// enough; same-edge is fine through the 2-cycle-delayed consume in the DUT)
@@ -440,6 +717,8 @@ module tb_fdc1772_physical;
 
 	always @(posedge clk_be) begin
 		fifo_wr_en   <= 1'b0;
+		wf_rd_en     <= 1'b0;                        // #244: write-FIFO pop strobe
+		if (be_wbusy_hold != 0) be_wbusy_hold <= be_wbusy_hold - 1;
 		be_stepreq_sd <= be_stepreq_s;
 		be_rdreq_sd   <= be_rdreq_s;
 		be_cancel_sd  <= be_cancel_s;
@@ -449,7 +728,7 @@ module tb_fdc1772_physical;
 		phys_media_ready  <= 1'b1;
 		phys_motor_on     <= 1'b1;
 		phys_head_settled <= 1'b1;
-		phys_wprot        <= 1'b0;
+		phys_wprot        <= be_wprot;              // #244: tab stimulus (0 for groups 1-13)
 		phys_change       <= 1'b0;
 
 		// ---- Type-I step: move the head, then ack after a few cycles ----
@@ -504,6 +783,18 @@ module tb_fdc1772_physical;
 				be_dly  <= be_start_delay;
 				be_crc_bad <= crc_payload_req;
 				crc_payload_req <= 1'b0;
+				if (phys_rd_op[2]) begin
+					// #244: write op accepted -- payload, fresh per-op state
+					be_wsec      <= phys_rd_sector;
+					be_wtrk      <= phys_rd_track;
+					be_deleted_s <= phys_wr_deleted;
+					be_precomp_s <= phys_wr_precomp;
+					phys_wr_lost <= 1'b0;              // sticky per op, cleared at acceptance
+					wpop_cnt = 0;
+					wsec_log[be_wops % 16] = phys_rd_sector;
+					wseq_log[be_wops % 16] = phys_rd_seq;
+					be_wops = be_wops + 1;
+				end
 				if (stray_req) begin
 					// residue regression: one spurious byte enters the FIFO
 					// after the op started (drain closed), BEFORE the real
@@ -530,6 +821,21 @@ module tb_fdc1772_physical;
 			else if (be_op == RDOP_READ_ADDRESS) begin
 				be_racrc <= 16'hB230;    // CRC state after A1 A1 A1 FE
 				be_state <= 4'd4;
+			end else if (be_op == WROP_WRITE_SECTOR || be_op == WROP_WRITE_TRACK) begin
+				// #244: write engine
+				be_wop <= 1'b1;
+				if (wr_force_wp) begin
+					wr_force_wp <= 1'b0;
+					be_wdone(be_seq, PRES_WRITE_PROTECTED, 1'b1, 1'b1);
+					be_state <= 4'd0;
+				end else if (be_op == WROP_WRITE_TRACK) begin
+					phys_wr_feed <= 1'b1;            // track: feed at once (first DRQ now)
+					be_wn <= wr_trk_lead; be_wtick <= WRB;
+					be_state <= 4'd15;
+				end else begin
+					be_wtick <= wr_search_dly;
+					be_state <= 4'd9;
+				end
 			end else begin
 				// verify: report OK immediately (matching track -> no seek error)
 				be_done(be_seq, 1'b0, 1'b0);
@@ -581,8 +887,160 @@ module tb_fdc1772_physical;
 				be_state        <= 4'd0;
 			end
 		end
+		// ---------------- #244 write engine states ----------------
+		4'd9: if (!be_can_edge) begin // W_SEARCH: modelled ID search
+			if (be_wtick > 1) be_wtick <= be_wtick - 1;
+			else if (be_wsec > wr_rnf_above || be_wsec == 8'd0) begin
+				be_tres <= PRES_RECORD_NOT_FOUND; be_trnf <= 1'b1; be_tcrc <= 1'b0;
+				be_wguard <= 8'd16; be_state <= 4'd14;
+			end else begin
+				phys_wr_feed <= 1'b1;          // ID found: DRQ may start in the drive
+				be_wn <= 16'd22; be_wtick <= WRB;
+				be_state <= 4'd10;
+			end
+		end
+		4'd10: if (!be_can_edge) begin // W_GAP: 22 byte-times, first-byte rule at expiry
+			if (be_wtick > 1) be_wtick <= be_wtick - 1;
+			else begin
+				be_wtick <= WRB;
+				if (be_wn > 1) be_wn <= be_wn - 1;
+				else if (wf_rd_empty) begin
+					phys_wr_feed <= 1'b0;      // real-chip rule: no gate, LOST DATA
+					be_tres <= PRES_LOST_DATA; be_trnf <= 1'b0; be_tcrc <= 1'b0;
+					be_wguard <= 8'd16; be_state <= 4'd14;
+				end else begin
+					be_session <= 1'b1; be_session_seen <= 1'b1;   // WGATE: 12x00 3xA1 DAM
+					be_wn <= 16'd16;
+					be_state <= 4'd11;
+				end
+			end
+		end
+		4'd11: if (!be_can_edge) begin // W_PRE: 16 byte-times of preamble
+			if (be_wtick > 1) be_wtick <= be_wtick - 1;
+			else begin
+				be_wtick <= WRB;
+				if (be_wn > 1) be_wn <= be_wn - 1;
+				else begin be_widx <= 11'd0; be_wtick <= 1; be_state <= 4'd12; end
+			end
+		end
+		4'd12: if (!be_can_edge) begin // W_DATA: one pop per byte-time, 512 slots
+			if (be_wtick > 1) be_wtick <= be_wtick - 1;
+			else begin
+				be_wtick <= WRB;
+				if (be_widx == 11'd512) begin
+					be_wn <= 16'd3; be_state <= 4'd13;       // CRC hi, CRC lo, FF
+				end else begin
+					if (!wf_rd_empty) begin
+						wf_rd_en <= 1'b1; w_pops = w_pops + 1;
+						wpop[wpop_cnt] = wf_rd_data; wall[wall_cnt] = wf_rd_data;
+					end else begin
+						wpop[wpop_cnt] = 8'h00; wall[wall_cnt] = 8'h00;
+						phys_wr_lost <= 1'b1;                  // starved slot: 00 + sticky lost
+					end
+					wpop_cnt = wpop_cnt + 1; wall_cnt = wall_cnt + 1;
+					be_widx <= be_widx + 11'd1;
+				end
+			end
+		end
+		4'd13: if (!be_can_edge) begin // W_POST: CRC, CRC, FF; then the writer tail
+			if (be_wtick > 1) be_wtick <= be_wtick - 1;
+			else begin
+				be_wtick <= WRB;
+				if (be_wn > 1) be_wn <= be_wn - 1;
+				else begin
+					be_session    <= 1'b0;                 // WGATE closes after the FF
+					be_wbusy_hold <= (3 * WRB) / 16;       // ~3 cells of writer tail
+					phys_wr_feed  <= 1'b0;
+					be_tres <= PRES_OK; be_trnf <= 1'b0; be_tcrc <= 1'b0;
+					be_wguard <= 8'd16; be_state <= 4'd14;
+				end
+			end
+		end
+		4'd14: if (!be_can_edge) begin // W_TAIL: feed off, guard, writer idle, drain, done
+			// Every write termination ends here, in this order: feed is already
+			// low (set by the transition), >= 16 clk_be pass so that no push
+			// launched under the old feed can still be in flight, the writer is
+			// idle, the FIFO is drained to empty, then the done (with the result
+			// latched by the transition).
+			phys_wr_feed <= 1'b0;
+			if (be_wguard != 0) be_wguard <= be_wguard - 8'd1;
+			if (!wf_rd_empty) begin
+				if (!wf_rd_en) begin wf_rd_en <= 1'b1; w_pops = w_pops + 1; wdrain_cnt = wdrain_cnt + 1; end
+			end else if (!wf_rd_en && be_wguard == 0 && wr_busy_extra != 0) begin
+				// (20) stimulus: done toggles while the writer busy level is still up
+				be_wbusy_hold <= wr_busy_extra;
+				wr_busy_extra <= 0;
+				be_wdone(be_seq, be_tres, be_trnf, be_tcrc);
+				be_state <= 4'd0;
+			end else if (!wf_rd_en && be_wguard == 0 && be_wbusy_hold == 0 && !phys_wr_busy) begin
+				be_wdone(be_seq, be_tres, be_trnf, be_tcrc);
+				be_state <= 4'd0;
+			end
+		end
+		4'd15: if (!be_can_edge) begin // T_ARM: feed is up; wait for the starting index
+			if (be_wtick > 1) be_wtick <= be_wtick - 1;
+			else begin
+				be_wtick <= WRB;
+				if (be_wn > 1) be_wn <= be_wn - 1;
+				else if (wr_trk_noidx) begin
+					wr_trk_noidx <= 1'b0;
+					phys_wr_feed <= 1'b0;                  // no index: RES_NO_INDEX + rnf
+					be_tres <= PRES_NO_INDEX; be_trnf <= 1'b1; be_tcrc <= 1'b0;
+					be_wguard <= 8'd16; be_state <= 4'd14;
+				end else if (wf_rd_empty) begin
+					phys_wr_feed <= 1'b0;                  // first token missing at the index
+					be_tres <= PRES_LOST_DATA; be_trnf <= 1'b0; be_tcrc <= 1'b0;
+					be_wguard <= 8'd16; be_state <= 4'd14;
+				end else begin
+					be_session <= 1'b1; be_session_seen <= 1'b1;
+					be_wn <= wr_trk_len; be_wpause <= 1'b0;
+					be_wtick <= 1; be_state <= 4'd3;
+				end
+			end
+		end
+		4'd3: if (!be_can_edge) begin // T_STREAM: one token per byte-time, F7 = two slots
+			if (be_wtick > 1) be_wtick <= be_wtick - 1;
+			else begin
+				be_wtick <= WRB;
+				if (be_wn == 16'd0) begin
+					// ending index: cut -- WGATE closes within one cell
+					be_session <= 1'b0; be_wbusy_hold <= WRB / 16;
+					phys_wr_feed <= 1'b0;
+					be_tres <= PRES_OK; be_trnf <= 1'b0; be_tcrc <= 1'b0;
+					be_wguard <= 8'd16; be_state <= 4'd14;
+				end else begin
+					be_wn <= be_wn - 16'd1;
+					if (be_wpause) be_wpause <= 1'b0;      // CRC-lo slot of the previous F7
+					else if (!wf_rd_empty) begin
+						wf_rd_en <= 1'b1; w_pops = w_pops + 1;
+						wpop[wpop_cnt] = wf_rd_data; wall[wall_cnt] = wf_rd_data;
+						wpop_cnt = wpop_cnt + 1; wall_cnt = wall_cnt + 1;
+						if (wf_rd_data == 8'hF7) be_wpause <= 1'b1;
+					end else begin
+						wpop[wpop_cnt] = 8'h00; wall[wall_cnt] = 8'h00;
+						wpop_cnt = wpop_cnt + 1; wall_cnt = wall_cnt + 1;
+						phys_wr_lost <= 1'b1;
+					end
+				end
+			end
+		end
 		default: be_state <= 4'd0;
 		endcase
+
+		// #244: write-engine housekeeping. A cancel (Force Interrupt) closes the
+		// session and the feed at once and is counted; the idle and cancelled
+		// states drain any residue of the write FIFO (the controller's
+		// "FIFO empty at every op boundary" rule); the writer busy level is the
+		// session plus its tail.
+		if (be_can_edge && be_wop) be_wcancel_edges = be_wcancel_edges + 1;
+		if (be_state == 4'd7 && be_wop) begin be_session <= 1'b0; phys_wr_feed <= 1'b0; end
+		if (be_state == 4'd0) be_wop <= 1'b0;
+		if (((be_state == 4'd0 && !be_pend) || be_state == 4'd7) && !wf_rd_empty && !wf_rd_en) begin
+			wf_rd_en <= 1'b1; w_pops = w_pops + 1; wdrain_cnt = wdrain_cnt + 1;
+			if (be_state == 4'd0) wresidue_cnt = wresidue_cnt + 1;   // residue: a protocol bug
+		end
+		phys_wr_busy <= be_session || (be_wbusy_hold != 0);
+		if (phys_wr_busy && !(be_session || (be_wbusy_hold != 0))) t_be_busy_fall = $time;
 	end
 
 	// (10) count the request edges the mock controller actually sees (a
@@ -746,19 +1204,219 @@ module tb_fdc1772_physical;
 	endtask
 
 	// -----------------------------------------------------------------------
+	// #244: cycle-modelled drive CPU for the write groups. One 6502 cycle is
+	// one T65 bus cycle of CYC clkcpu. Every task starts and ends 1 ns after a
+	// clkcpu edge. bus_rd/bus_wr are exactly one cycle with the select up for
+	// all CYC clkcpu; bus_wr drives R/W low only in the last clkcpu (ph2_f),
+	// which is where the T65 write strobe of c1581_drv lands.
+	// -----------------------------------------------------------------------
+	task cyc(input integer n);
+		integer k;
+	begin
+		for (k = 0; k < n * CYC; k = k + 1) @(posedge clkcpu);
+		#1;
+	end
+	endtask
+
+	task bus_rd(input [1:0] a, output [7:0] d);
+		integer k;
+	begin
+		cpu_sel = 1'b1; cpu_rw = 1'b1; cpu_addr = a;
+		for (k = 0; k < CYC - 1; k = k + 1) @(posedge clkcpu);
+		#1; d = cpu_dout;                 // value of the closing clkcpu
+		@(posedge clkcpu); #1;
+		cpu_sel = 1'b0;
+	end
+	endtask
+
+	task bus_wr(input [1:0] a, input [7:0] d);
+		integer k;
+	begin
+		cpu_sel = 1'b1; cpu_rw = 1'b1; cpu_addr = a; cpu_din = d;
+		for (k = 0; k < CYC - 1; k = k + 1) @(posedge clkcpu);
+		#1; cpu_rw = 1'b0;                // ph2_f: the one write-strobe clkcpu
+		@(posedge clkcpu); #1;
+		cpu_sel = 1'b0; cpu_rw = 1'b1;
+	end
+	endtask
+
+	// $CBF4 command writer: NOP; STA $6000; LDA #1; BIT $6000; BEQ (loop until
+	// BUSY reads 1, first sample 6 cycles after the write, 7-cycle period, NO
+	// timeout in the ROM -- bounded at maxpoll here); then JMP $AD34 (26 cycles).
+	integer polls_w;
+	time    t_cmdw, t_bset;
+	task rom_cmd(input [7:0] c, input integer maxpoll, input [255:0] what);
+		reg [7:0] st;
+		integer g;
+		reg seen;
+	begin
+		cyc(2);                                    // NOP
+		cyc(3); t_cmdw = $time; bus_wr(REG_CMDSTATUS, c);   // STA $6000
+		cyc(2);                                    // LDA #1
+		g = 0; seen = 0;
+		while (!seen) begin
+			cyc(3); bus_rd(REG_CMDSTATUS, st);     // BIT $6000
+			g = g + 1;
+			if (st[0] === 1'b1) begin seen = 1; t_bset = $time; cyc(2); end   // BEQ not taken
+			else begin
+				cyc(3);                            // BEQ taken
+				if (g >= maxpoll) begin
+					errors = errors + 1; seen = 1;
+					$display("FAIL: BUSY never seen SET after %0d $CBF4 polls (%0s) @%0t", g, what, $time);
+				end
+			end
+		end
+		polls_w = g;
+		cyc(26);                                   // JMP $AD34 delay
+	end
+	endtask
+
+	// $CD3F status epilogue: JSR $CD3F; JSR $CBEC (BIT $6000 / BNE until BUSY = 0,
+	// 7-cycle period); RTS; PHP; LDA $6000 -> the status the job evaluates.
+	task rom_status(output [7:0] st_out, input [255:0] what);
+		reg [7:0] st;
+		integer g;
+		reg idle;
+	begin
+		cyc(6 + 6);                                // JSR $CD3F, JSR $CBEC
+		g = 0; idle = 0;
+		while (!idle) begin
+			cyc(3); bus_rd(REG_CMDSTATUS, st);     // BIT $6000
+			g = g + 1;
+			if (st[0] !== 1'b1) begin idle = 1; cyc(2); end
+			else begin
+				cyc(3);
+				if (g > 400000) begin
+					errors = errors + 1; idle = 1;
+					$display("FAIL: BUSY never cleared in $CBEC (%0s) @%0t", what, $time);
+				end
+			end
+		end
+		cyc(6 + 3 + 3);                            // RTS, PHP, LDA abs (fetch)
+		bus_rd(REG_CMDSTATUS, st_out);
+		cyc(6 + 2 + 2 + 2 + 4 + 4 + 3 + 6);        // LSR x3, BCS, AND, TAX, PLP, LDA abs,X, STA zp, RTS
+	end
+	endtask
+
+	// $C667 write transfer loop: LDA $6000; AND #$03; LSR; BCC done; BEQ loop
+	// (13-cycle poll, BUSY first, DRQ second), then STY/LDY/LDA (zp),Y/STA $6003
+	// (22 cycles from the status sample to the data write), LDY; INC $4A; BNE
+	// (11 cycles back to the poll, 20 at a page crossing), two pages. With
+	// count_exit=0 the page count is ignored and the loop runs until BUSY drops
+	// (multi-sector / Write Track feeding). stall_at/stall_cyc: optional CPU
+	// stall after that many bytes; stop_after: return early with the op running.
+	reg  [7:0] wbuf [0:8191];
+	integer    wr_written;
+	reg        wr_early;
+	task rom_wloop(input integer base, input integer start, input count_exit,
+	               input integer stall_at, input integer stall_cyc,
+	               input integer stop_after, input integer maxbytes, input [255:0] what);
+		reg [7:0] st;
+		reg done_loop;
+		integer g;
+	begin
+		wr_written = start; done_loop = 0; wr_early = 0; g = 0;
+		while (!done_loop) begin
+			cyc(3); bus_rd(REG_CMDSTATUS, st);     // LDA $6000
+			cyc(4);                                // AND #$03, LSR A
+			g = g + 1;
+			if (st[0] !== 1'b1) begin
+				cyc(3); wr_early = 1; done_loop = 1;   // BCC taken -> $C6CC
+			end else begin
+				cyc(2);                            // BCC not taken
+				if (st[1] !== 1'b1) cyc(3);        // BEQ taken -> poll again
+				else begin
+					cyc(2);                        // BEQ not taken
+					cyc(3 + 2 + 5 + 3);            // STY $82, LDY #0, LDA ($4A),Y, STA abs fetch
+					bus_wr(REG_DATA, wbuf[base + wr_written]);
+					wr_written = wr_written + 1;
+					cyc(3 + 5);                    // LDY $82, INC $4A
+					if (!count_exit || (wr_written % 256) != 0) cyc(3);     // BNE taken
+					else begin
+						cyc(2 + 5 + 2);            // BNE not taken, INC $4B, DEY
+						if (wr_written >= 512) begin cyc(2); done_loop = 1; end   // -> JSR $CD3F
+						else cyc(3);
+					end
+					if (wr_written == stall_at) cyc(stall_cyc);
+					if (wr_written == stop_after) done_loop = 1;
+					if (wr_written >= maxbytes) done_loop = 1;
+				end
+			end
+			if (g > 2000000) begin
+				errors = errors + 1; done_loop = 1;
+				$display("FAIL: rom_wloop guard (%0s, %0d bytes) @%0t", what, wr_written, $time);
+			end
+		end
+	end
+	endtask
+
+	// fastest possible feeder: one status read per cycle, a data write the very
+	// next cycle after DRQ is seen (pressure test of the FIFO-room DRQ)
+	task fast_wloop(input integer base, input integer n, input [255:0] what);
+		reg [7:0] st;
+		reg done_loop;
+		integer g;
+	begin
+		wr_written = 0; done_loop = 0; wr_early = 0; g = 0;
+		while (!done_loop) begin
+			bus_rd(REG_CMDSTATUS, st);
+			g = g + 1;
+			if (st[0] !== 1'b1) begin wr_early = 1; done_loop = 1; end
+			else if (st[1] === 1'b1) begin
+				bus_wr(REG_DATA, wbuf[base + wr_written]);
+				wr_written = wr_written + 1;
+				if (wr_written >= n) done_loop = 1;
+			end
+			if (g > 4000000) begin
+				errors = errors + 1; done_loop = 1;
+				$display("FAIL: fast_wloop guard (%0s) @%0t", what, $time);
+			end
+		end
+	end
+	endtask
+
+	// compare the slots the backend wrote for the current op with wbuf
+	task check_pops(input integer base, input integer n, input [255:0] what);
+		integer k, bad;
+	begin
+		bad = 0;
+		for (k = 0; k < n; k = k + 1)
+			if (wpop[k] !== wbuf[base + k]) begin
+				if (bad < 4) $display("FAIL: %0s slot %0d got %02h expected %02h", what, k, wpop[k], wbuf[base + k]);
+				bad = bad + 1;
+			end
+		errors = errors + (bad != 0);
+		if (bad == 0) $display("ok  : %0s: %0d slots byte-exact", what, n);
+	end
+	endtask
+
+	function [7:0] wpat(input [7:0] sec, input integer i);
+		wpat = (i * 7 + sec * 31 + 3) ^ (i >> 8);
+	endfunction
+
+	// INTRQ rise counter and the WD BUSY edges (busy duration measurements)
+	integer cnt_irq = 0;
+	time    t_wd_busy_rise = 0, t_wd_busy_fall = 0;
+	always @(posedge irq) cnt_irq = cnt_irq + 1;
+	always @(posedge fdc_busy) t_wd_busy_rise = $time;
+	always @(negedge fdc_busy) t_wd_busy_fall = $time;
+
+	// -----------------------------------------------------------------------
 	// stimulus
 	// -----------------------------------------------------------------------
 	reg  [7:0]  rbyte, status;
 	reg  [15:0] swcrc;
 	integer     i, k, exp_fin, base_stale, base_busycmd, base_drain;
 	integer     base_lost, base_req;
+	integer     k2, u, z, bad, ntok, exp_wfin, base_drop;   // #244 write groups
 	reg  [1:0]  seq_before;
 	time        t_start;
 
 	initial begin
 		// global watchdog (the paced RS ops alone are ~15.5 ms each; tests
 		// 2a, 3 and 10 each stream a full 512-byte sector at pace)
-		#200_000_000;
+		// (#244: the write groups add ~300 ms of disk time)
+		#1_200_000_000;
 		$display("FAIL: global timeout");
 		$fatal(1, "global timeout");
 	end
@@ -1320,6 +1978,304 @@ module tb_fdc1772_physical;
 		swcrc = 16'hB230;
 		for (i = 0; i < 6 && i < rxcnt; i = i + 1) swcrc = crc16(swcrc, rxbuf[i]);
 		expect_eq(swcrc, 16'h0000, "(11b) post-RESTORE RA CRC residue (engine healthy)");
+
+		// =====================================================================
+		// #244 PHYSICAL WRITE GROUPS (14)-(22), monitors (24) -- see the header
+		// =====================================================================
+		@(posedge clkcpu); #1;
+		exp_wfin = cnt_wr_fin;
+
+		// ------------- (14) WRITE SECTOR, ROM idiom, byte-exact, back-to-back -------------
+		$display("--- (14) WRITE SECTOR, ROM idiom ($CBF4 / $C667 / $CD3F), 2 sectors back to back ---");
+		for (i = 0; i < 512; i = i + 1) begin
+			wbuf[i]       = wpat(8'd4, i);
+			wbuf[512 + i] = wpat(8'd5, i);
+		end
+		base_req = be_req_edges;
+		k = be_wops;
+		cyc(3); bus_wr(REG_TRACK, 8'd3);              // $C60C: STA $6001 (cylinder)
+		cyc(3); bus_wr(REG_SECTOR, 8'd4);             // sector = R + 1
+		cyc(40);                                      // 20 x NOP
+		lat_on = 1; lat_first_pending = 1; lat_n = 0;
+		rom_cmd(8'hA8, 200, "(14a) A8 busy-set");
+		expect_eq((polls_w <= 3), 1'b1, "(14a) BUSY seen SET within 3 $CBF4 polls");
+		expect_eq(be_op, WROP_WRITE_SECTOR, "(14a) backend accepted op 100 (Write Sector)");
+		expect_eq(be_wsec, 8'd4, "(14a) request sector = sector register");
+		expect_eq(be_wtrk, 8'd3, "(14a) request track = track register");
+		expect_eq(be_deleted_s, 1'b0, "(14a) a0 = 0 -> normal DAM (phys_wr_deleted = 0)");
+		expect_eq(be_precomp_s, 1'b1, "(14a) P = 0 -> precomp requested (phys_wr_precomp = 1)");
+		rom_wloop(0, 0, 1'b1, -1, 0, -1, 512, "(14a)");
+		expect_eq(wr_written, 512, "(14a) ROM loop wrote 512 bytes");
+		expect_eq(wr_early, 1'b0, "(14a) loop left by its page count (no early BUSY drop)");
+		rom_status(status, "(14a)");
+		expect_eq(status & 8'h5D, 8'h00, "(14a) status bits 6/4/3/2/0 clear");
+		expect_eq(wpop_cnt, 512, "(14a) backend wrote 512 data slots");
+		check_pops(0, 512, "(14a) popped bytes equal the bytes written, in order");
+		exp_wfin = exp_wfin + 1;
+		$display("info: (14a) first byte DRQ->data %0d ns (%0d bench cycles)", lat_first, lat_first / 960);
+		// $C685..$C65A: BNE, DEC $3A, BEQ, LDA $6002, INC $6002 (RMW), 20 x NOP, CMP, BNE,
+		// LDA $01E0, JSR $CBF4 -- the next sector of the side flush, no Read Address between
+		cyc(2 + 5 + 2);
+		cyc(3); bus_rd(REG_SECTOR, rbyte);            // LDA $6002
+		cyc(3); bus_rd(REG_SECTOR, rbyte);            // INC $6002: read,
+		bus_wr(REG_SECTOR, rbyte);                    //   write old,
+		bus_wr(REG_SECTOR, rbyte + 8'd1);             //   write new
+		cyc(40 + 3 + 3 + 4 + 6);
+		lat_first_pending = 1;
+		rom_cmd(8'hAA, 200, "(14b) AA busy-set");      // P = 1 (cylinders 0 and 44-79)
+		$display("info: (14b) WD BUSY drop -> next command write %0d ns = %0d bench cycles (ROM: 132-135 cycles)",
+		         t_cmdw - t_wd_busy_fall, (t_cmdw - t_wd_busy_fall) / 960);
+		expect_eq((polls_w <= 3), 1'b1, "(14b) BUSY seen SET within 3 $CBF4 polls");
+		expect_eq(be_wsec, 8'd5, "(14b) request sector = 5 (INC $6002)");
+		expect_eq(be_precomp_s, 1'b0, "(14b) P = 1 -> no precomp (phys_wr_precomp = 0)");
+		rom_wloop(512, 0, 1'b1, -1, 0, -1, 512, "(14b)");
+		expect_eq(wr_written, 512, "(14b) ROM loop wrote 512 bytes");
+		rom_status(status, "(14b)");
+		expect_eq(status & 8'h5D, 8'h00, "(14b) status bits 6/4/3/2/0 clear");
+		check_pops(512, 512, "(14b) popped bytes equal the bytes written, in order");
+		exp_wfin = exp_wfin + 1;
+		expect_eq(be_req_edges - base_req, 2, "(14) exactly one request per Write Sector");
+		expect_eq((wseq_log[k % 16] != wseq_log[(k + 1) % 16]), 1'b1, "(14) consecutive write ops carry fresh tags");
+		lat_on = 0;
+		$display("info: (14) data DRQ->data latency min %0d ns max %0d ns over %0d bytes (%0d..%0d bench cycles)",
+		         lat_min, lat_max, lat_n, lat_min / 960, lat_max / 960);
+
+		// ------------- (15) FIFO-ROOM DRQ under a maximally fast CPU -------------
+		$display("--- (15) FIFO-ROOM DRQ (CPU writes the moment DRQ is seen) ---");
+		for (i = 0; i < 512; i = i + 1) wbuf[i] = wpat(8'd6, i) ^ 8'h5A;
+		cyc(3); bus_wr(REG_SECTOR, 8'd6);
+		w_lead_max = 0; w_pushes = 0; w_pops = 0;    // backend idle, FIFO empty here
+		k = cnt_wr_drop;
+		rom_cmd(8'hA8, 200, "(15) busy-set");
+		fast_wloop(0, 512, "(15)");
+		expect_eq(wr_written, 512, "(15) fast CPU wrote 512 bytes");
+		rom_status(status, "(15)");
+		expect_eq(status & 8'h5D, 8'h00, "(15) status bits 6/4/3/2/0 clear");
+		check_pops(0, 512, "(15) popped bytes equal the bytes written");
+		exp_wfin = exp_wfin + 1;
+		$display("info: (15) max bytes outstanding (pushed, not yet popped) = %0d; FIFO depth 4", w_lead_max);
+		expect_eq((w_lead_max <= 4), 1'b1, "(15) CPU never more than the FIFO depth (4) ahead of the pops");
+		expect_eq(cnt_wr_drop - k, 0, "(15) no data-register write dropped");
+		expect_eq(viol_drq_full, 0, "(15) DRQ never high while the FIFO is full (so far)");
+		expect_eq(viol_push_full, 0, "(15) no push strobe into a full FIFO (so far)");
+
+		// ------------- (16) FIRST-BYTE ABORT -------------
+		$display("--- (16) FIRST-BYTE ABORT (the CPU never writes) ---");
+		cyc(3); bus_wr(REG_SECTOR, 8'd7);
+		be_session_seen = 0;
+		rom_cmd(8'hA8, 200, "(16) busy-set");
+		expect_eq((polls_w <= 3), 1'b1, "(16) BUSY seen SET within 3 polls");
+		rom_status(status, "(16)");                   // the job just waits for BUSY = 0
+		expect_eq(status & 8'h5D, 8'h04, "(16) status: LOST DATA (bit 2) alone, BUSY clear");
+		expect_eq(phys_rd_result, PRES_LOST_DATA, "(16) controller result RES_LOST_DATA");
+		expect_eq(wpop_cnt, 0, "(16) no byte popped");
+		expect_eq(be_session_seen, 1'b0, "(16) WGATE never opened");
+		exp_wfin = exp_wfin + 1;
+
+		// ------------- (17) LOST DATA STICKY -------------
+		$display("--- (17) LOST DATA STICKY (CPU stalls 6 byte-times after byte 100) ---");
+		for (i = 0; i < 512; i = i + 1) wbuf[i] = wpat(8'd8, i) | 8'h01;   // no 00 data byte
+		cyc(3); bus_wr(REG_SECTOR, 8'd8);
+		k2 = wdrain_cnt;
+		rom_cmd(8'hA8, 200, "(17) busy-set");
+		rom_wloop(0, 0, 1'b1, 100, 6 * 64, -1, 512, "(17)");
+		expect_eq(wr_written, 512, "(17) the CPU still delivered 512 bytes (DRQ continued)");
+		rom_status(status, "(17)");
+		expect_eq(status & 8'h5D, 8'h04, "(17) status: LOST DATA (bit 2) alone at completion");
+		expect_eq(phys_rd_result, PRES_OK, "(17) the op itself completed (RES_OK + lost level)");
+		expect_eq(wpop_cnt, 512, "(17) the op still wrote 512 slots");
+		u = 0; while (u < 512 && wpop[u] === wbuf[u]) u = u + 1;
+		z = 0; while (u + z < 512 && wpop[u + z] === 8'h00) z = z + 1;
+		bad = 0;
+		for (i = u + z; i < 512; i = i + 1) if (wpop[i] !== wbuf[i - z]) bad = bad + 1;
+		$display("info: (17) first starved slot %0d, %0d slot(s) written as 00, %0d late byte(s) drained",
+		         u, z, wdrain_cnt - k2);
+		expect_eq((u >= 100), 1'b1, "(17) every byte before the stall written exactly");
+		expect_eq((z >= 1), 1'b1, "(17) the stall starved at least one slot (00 written)");
+		expect_eq(bad, 0, "(17) after the starved slots the late bytes follow, shifted");
+		expect_eq(wdrain_cnt - k2, z, "(17) the shifted-out late bytes were drained, not written");
+		exp_wfin = exp_wfin + 1;
+
+		// ------------- (18) WRITE-PROTECT PRE-CHECK -------------
+		$display("--- (18) WRITE-PROTECT PRE-CHECK and RES_WRITE_PROTECTED purity ---");
+		be_wprot = 1'b1;
+		repeat (64) @(posedge clkcpu); #1;            // the level reaches phys_wprot_c
+		base_req = be_req_edges; k = cnt_wr_wp; k2 = cnt_irq;
+		rom_cmd(8'hA8, 200, "(18a) WP busy-set");
+		expect_eq((polls_w <= 3), 1'b1, "(18a) BUSY of the WP refusal seen within 3 $CBF4 polls");
+		rom_wloop(0, 0, 1'b1, -1, 0, -1, 512, "(18a)");
+		expect_eq(wr_written, 0, "(18a) no DRQ, no byte");
+		expect_eq(wr_early, 1'b1, "(18a) the $C667 loop left on the BUSY drop");
+		rom_status(status, "(18a)");
+		expect_eq(status & 8'h5D, 8'h40, "(18a) status: WRITE PROTECT (bit 6) alone");
+		$display("info: (18a) WP refusal BUSY held %0d ns", t_wd_busy_fall - t_wd_busy_rise);
+		expect_eq((t_wd_busy_fall - t_wd_busy_rise >= 1_400_000 && t_wd_busy_fall - t_wd_busy_rise <= 3_000_000),
+		          1'b1, "(18a) BUSY held for the minimum busy time (12000 clk8m ticks)");
+		expect_eq(be_req_edges - base_req, 0, "(18a) no request toggle reached the controller");
+		expect_eq(cnt_wr_wp - k, 1, "(18a) WP pre-check diag toggled once");
+		expect_eq((cnt_irq > k2), 1'b1, "(18a) INTRQ raised");
+		be_wprot = 1'b0;
+		repeat (64) @(posedge clkcpu); #1;
+		wr_force_wp = 1'b1;
+		rom_cmd(8'hA8, 200, "(18b) busy-set");
+		expect_eq((polls_w <= 3), 1'b1, "(18b) BUSY seen within 3 polls although the done came at once");
+		rom_wloop(0, 0, 1'b1, -1, 0, -1, 512, "(18b)");
+		rom_status(status, "(18b)");
+		expect_eq(status & 8'h5D, 8'h40, "(18b) RES_WRITE_PROTECTED with rnf+crc: bit 6 ALONE");
+		$display("info: (18b) immediate controller refusal BUSY held %0d ns", t_wd_busy_fall - t_wd_busy_rise);
+		expect_eq((t_wd_busy_fall - t_wd_busy_rise >= 1_400_000), 1'b1, "(18b) BUSY held >= the minimum busy time");
+		expect_eq(be_req_edges - base_req, 1, "(18b) one request");
+		exp_wfin = exp_wfin + 1;
+		for (i = 0; i < 512; i = i + 1) wbuf[i] = wpat(8'd1, i);
+		cyc(3); bus_wr(REG_SECTOR, 8'd1);
+		rom_cmd(8'hA8, 200, "(18c) busy-set");
+		rom_wloop(0, 0, 1'b1, -1, 0, -1, 512, "(18c)");
+		rom_status(status, "(18c)");
+		expect_eq(status & 8'h5D, 8'h00, "(18c) tab writable again: clean write (and (17)'s next op is clean)");
+		check_pops(0, 512, "(18c) popped bytes equal the bytes written");
+		exp_wfin = exp_wfin + 1;
+
+		// ------------- (19) FORCE INTERRUPT MID-WRITE -------------
+		$display("--- (19) FORCE INTERRUPT MID-WRITE ---");
+		for (i = 0; i < 512; i = i + 1) wbuf[i] = wpat(8'd3, i);
+		cyc(3); bus_wr(REG_SECTOR, 8'd3);
+		be_cancel_delay = 16'd2000;                   // the aborted op's done comes 40 us late
+		k = be_wcancel_edges; base_stale = cnt_stale; k2 = cnt_wr_fin;
+		rom_cmd(8'hA8, 200, "(19) busy-set");
+		rom_wloop(0, 0, 1'b1, -1, 0, 100, 512, "(19)");   // 100 bytes, op running
+		expect_eq(wr_written, 100, "(19) 100 bytes written before the interrupt");
+		cyc(2); cyc(3); bus_wr(REG_CMDSTATUS, 8'hD0);      // $CFD1: LDA #$D0; STA $6000
+		cyc(1); bus_rd(REG_CMDSTATUS, status);
+		expect_eq(status & 8'h03, 8'h00, "(19) BUSY and DRQ clear right after Force Interrupt");
+		i = 0;
+		while (cnt_stale == base_stale && i < 400000) begin @(posedge clkcpu); i = i + 1; end
+		#1;
+		repeat (200) @(posedge clkcpu); #1;
+		// (FI while busy executes on two consecutive clk8m ticks -- the cmd_rx
+		// stretch the reissue gate relies on -- so the cancel toggles twice; the
+		// second edge hits the already-aborting engine, as on the read path)
+		expect_eq((be_wcancel_edges - k >= 1), 1'b1, "(19) the backend saw the cancel during the write op");
+		expect_eq(cnt_stale - base_stale, 1, "(19) the cancelled op's late done was ignored by tag");
+		expect_eq(cnt_wr_fin - k2, 0, "(19) no write finalize for the cancelled op");
+		expect_eq(wf_rd_empty, 1'b1, "(19) write FIFO drained after the abort");
+		expect_eq(drq, 1'b0, "(19) DRQ stays off");
+		expect_eq(fdc_busy, 1'b0, "(19) BUSY stays clear");
+		be_cancel_delay = 16'd0;
+
+		// ------------- (20) BUSY OUTLIVES THE WRITER + (23) COMMAND WHILE WRITE-BUSY -------------
+		$display("--- (20) BUSY OUTLIVES THE WRITER BUSY + (23) COMMAND WRITE WHILE WRITE-BUSY ---");
+		for (i = 0; i < 512; i = i + 1) wbuf[i] = wpat(8'd2, i);
+		cyc(3); bus_wr(REG_SECTOR, 8'd2);
+		wr_busy_extra = 32'd25000;                    // 500 us
+		base_req = be_req_edges; base_busycmd = cnt_busycmd;
+		rom_cmd(8'hA8, 200, "(20) busy-set");
+		rom_wloop(0, 0, 1'b1, -1, 0, 100, 512, "(20a)");
+		cyc(3); bus_wr(REG_CMDSTATUS, 8'h88);         // (23) Read Sector written while busy
+		cyc(4);
+		expect_eq(cnt_busycmd - base_busycmd, 1, "(23) non-FI command while write-busy ignored (busycmd diag)");
+		expect_eq(dut.cmd, 8'hA8, "(23) command register unchanged");
+		rom_wloop(0, 100, 1'b1, -1, 0, -1, 512, "(20b)");
+		expect_eq(wr_written, 512, "(20) all 512 bytes written");
+		rom_status(status, "(20)");
+		expect_eq(status & 8'h5D, 8'h00, "(20) status clean (and (19)'s next op is clean)");
+		check_pops(0, 512, "(20) popped bytes equal the bytes written");
+		expect_eq(be_req_edges - base_req, 1, "(23) the ignored command issued no request");
+		$display("info: (20) WD BUSY fell %0d ns after the done toggle, %0d ns after the writer busy fell",
+		         t_wd_busy_fall - t_be_wdone, t_wd_busy_fall - t_be_busy_fall);
+		expect_eq((t_wd_busy_fall - t_be_wdone >= 480_000), 1'b1, "(20) BUSY held until the writer busy fell (~500 us)");
+		expect_eq((t_wd_busy_fall >= t_be_busy_fall), 1'b1, "(20) BUSY fell only after the writer busy level fell");
+		exp_wfin = exp_wfin + 1;
+
+		// ------------- (21) MULTI-SECTOR WRITE (m = 1) -------------
+		$display("--- (21) MULTI-SECTOR WRITE SECTOR (m = 1): 9, 10, then RNF at 11 ---");
+		for (i = 0; i < 512; i = i + 1) begin
+			wbuf[i]       = wpat(8'd9, i);
+			wbuf[512 + i] = wpat(8'd10, i);
+		end
+		cyc(3); bus_wr(REG_SECTOR, 8'd9);
+		base_req = be_req_edges; k = be_wops; wall_cnt = 0;
+		rom_cmd(8'hB8, 200, "(21) busy-set");
+		rom_wloop(0, 0, 1'b0, -1, 0, -1, 1024, "(21)");
+		expect_eq(wr_written, 1024, "(21) the CPU fed 1024 bytes (two sectors)");
+		rom_status(status, "(21)");
+		expect_eq(status & 8'h5D, 8'h10, "(21) the chain ends with RECORD NOT FOUND alone");
+		expect_eq(be_req_edges - base_req, 3, "(21) three requests (9, 10, 11)");
+		expect_eq(wsec_log[k % 16], 8'd9, "(21) first op sector 9");
+		expect_eq(wsec_log[(k + 1) % 16], 8'd10, "(21) reissue sector 10 (sector_inc)");
+		expect_eq(wsec_log[(k + 2) % 16], 8'd11, "(21) reissue sector 11");
+		expect_eq((wseq_log[k % 16] != wseq_log[(k + 1) % 16] && wseq_log[(k + 1) % 16] != wseq_log[(k + 2) % 16]),
+		          1'b1, "(21) every reissue carries a fresh tag");
+		expect_eq(wall_cnt, 1024, "(21) 1024 slots written");
+		bad = 0;
+		for (i = 0; i < 1024; i = i + 1) if (wall[i] !== wbuf[i]) bad = bad + 1;
+		expect_eq(bad, 0, "(21) both sectors byte-exact");
+		cyc(3); bus_rd(REG_SECTOR, rbyte);
+		expect_eq(rbyte, 8'd11, "(21) sector register advanced to 11");
+		exp_wfin = exp_wfin + 3;
+
+		expect_eq(cnt_wr_drop, 0, "(14)-(21) no data-register write dropped in any Write Sector group");
+		base_drop = cnt_wr_drop;
+
+		// ------------- (22) WRITE TRACK -------------
+		$display("--- (22) WRITE TRACK (token stream, F7 double slot, index to index) ---");
+		ntok = 0;
+		for (i = 0; i < 32; i = i + 1) begin wbuf[ntok] = 8'h4E; ntok = ntok + 1; end
+		for (i = 0; i < 12; i = i + 1) begin wbuf[ntok] = 8'h00; ntok = ntok + 1; end
+		for (i = 0; i < 3;  i = i + 1) begin wbuf[ntok] = 8'hF5; ntok = ntok + 1; end
+		wbuf[ntok] = 8'hFE; wbuf[ntok + 1] = 8'h03; wbuf[ntok + 2] = 8'h00; wbuf[ntok + 3] = 8'h01;
+		wbuf[ntok + 4] = 8'h02; wbuf[ntok + 5] = 8'hF7; ntok = ntok + 6;
+		for (i = 0; i < 22; i = i + 1) begin wbuf[ntok] = 8'h4E; ntok = ntok + 1; end
+		for (i = 0; i < 12; i = i + 1) begin wbuf[ntok] = 8'h00; ntok = ntok + 1; end
+		for (i = 0; i < 3;  i = i + 1) begin wbuf[ntok] = 8'hF5; ntok = ntok + 1; end
+		wbuf[ntok] = 8'hFB; ntok = ntok + 1;
+		for (i = 0; i < 64; i = i + 1) begin wbuf[ntok] = i * 3 + 1; ntok = ntok + 1; end
+		wbuf[ntok] = 8'hF7; ntok = ntok + 1;
+		for (i = 0; i < 400; i = i + 1) begin wbuf[ntok] = 8'h4E; ntok = ntok + 1; end
+		wr_trk_lead = 16'd4; wr_trk_len = 16'd200;
+		k2 = wdrain_cnt;
+		cyc(3); bus_wr(REG_TRACK, 8'd3);
+		base_req = be_req_edges;
+		rom_cmd(8'hF8, 200, "(22) F8 busy-set");
+		expect_eq(be_op, WROP_WRITE_TRACK, "(22) backend accepted op 101 (Write Track)");
+		expect_eq(be_precomp_s, 1'b1, "(22) P = 0 -> precomp requested");
+		rom_wloop(0, 0, 1'b0, -1, 0, -1, ntok, "(22)");
+		expect_eq(wr_early, 1'b1, "(22) the token loop ended on the BUSY drop (ending index)");
+		rom_status(status, "(22)");
+		expect_eq(status & 8'h5D, 8'h00, "(22) status clean");
+		$display("info: (22) feed -> first DRQ %0d ns; tokens fed %0d, popped %0d, drained %0d, dropped after the index %0d",
+		         t_feed_to_drq, wr_written, wpop_cnt, wdrain_cnt - k2, cnt_wr_drop - base_drop);
+		expect_eq(wr_written - (cnt_wr_drop - base_drop), wpop_cnt + (wdrain_cnt - k2),
+		          "(22) every accepted token was either written or drained at the tail");
+		expect_eq((t_feed_to_drq < 1000), 1'b1, "(22) DRQ right after feed (< 1 us, CDC only)");
+		z = 0;
+		for (i = 0; i < wpop_cnt; i = i + 1) if (wpop[i] === 8'hF7) z = z + 1;
+		expect_eq(z, 2, "(22) both F7 tokens popped");
+		expect_eq((wpop_cnt + z == 200 || (wpop_cnt + z == 201 && wpop[wpop_cnt - 1] === 8'hF7)), 1'b1,
+		          "(22) one token per byte-time, F7 = two slots, 200 slots index to index");
+		check_pops(0, wpop_cnt, "(22) tokens popped in order");
+		expect_eq(phys_wr_lost, 1'b0, "(22) no starved token slot");
+		exp_wfin = exp_wfin + 1;
+		// 22b: no starting index -> RES_NO_INDEX (+rnf) -> RNF alone
+		wr_trk_noidx = 1'b1;
+		rom_cmd(8'hF8, 200, "(22b) busy-set");
+		rom_wloop(0, 0, 1'b0, -1, 0, -1, ntok, "(22b)");
+		rom_status(status, "(22b)");
+		expect_eq(status & 8'h5D, 8'h10, "(22b) no index: RECORD NOT FOUND alone");
+		expect_eq(wf_rd_empty, 1'b1, "(22b) tokens drained");
+		exp_wfin = exp_wfin + 1;
+		// 22c: first token missing at the starting index -> LOST DATA
+		rom_cmd(8'hF8, 200, "(22c) busy-set");
+		rom_status(status, "(22c)");
+		expect_eq(status & 8'h5D, 8'h04, "(22c) first token missing: LOST DATA alone");
+		exp_wfin = exp_wfin + 1;
+
+		// ------------- (24) continuous monitors -------------
+		expect_eq(cnt_wr_fin, exp_wfin, "(24) write finalize diag toggled once per completed write op");
+		expect_eq(wresidue_cnt, 0, "(24) no write-FIFO residue was ever found between ops");
+		expect_eq(viol_drq_full, 0, "(24) DRQ never high while the write FIFO was full");
+		expect_eq(viol_push_full, 0, "(24) no push strobe into a full write FIFO");
+		expect_eq(viol_drq_feed, 0, "(24) DRQ never high on a write op while the synced feed was 0");
+		expect_eq(viol_drq_feedraw, 0, "(24) DRQ never high more than 8 clkcpu after feed fell");
 
 		// -------------------- verdict --------------------
 		repeat (10) @(posedge clkcpu);

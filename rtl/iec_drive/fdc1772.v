@@ -128,6 +128,22 @@ module fdc1772 #(
 	input            phys_motor_on,
 	input            phys_head_settled,
 
+	// MEGA65 physical 1581 WRITE (issue #244): Write Sector / Write Track ride on
+	// the read-op request channel above (phys_rd_op 100 / 101, same toggle, seq
+	// tag, pending and done discipline). The bytes go through an external
+	// 4-deep Gray FIFO whose write side is native clkcpu (no sync on full/level);
+	// feed/lost/busy are 50 MHz levels, 2-FF synced below. Inert with phys_mode=0.
+	output reg       phys_wr_deleted,   // quasi-static with phys_rd_req_tgl: DAM F8 instead of FB (command a0)
+	output reg       phys_wr_precomp,   // quasi-static with phys_rd_req_tgl: precomp requested (command P = 0)
+	output reg       phys_wr_byte_wr,   // one-clkcpu push strobe into the write FIFO
+	output reg [7:0] phys_wr_byte_data, // the byte pushed with phys_wr_byte_wr
+	input            phys_wr_fifo_full, // write FIFO full (drive-domain native): DRQ source
+	input      [2:0] phys_wr_fifo_level,// write FIFO occupancy (drive-domain native, conservative-high;
+	                                    // ABI completeness, not used functionally: DRQ uses full)
+	input            phys_wr_feed,      // level: controller wants bytes (ID found / track op armed)
+	input            phys_wr_lost,      // level: a slot was served from an empty FIFO (sticky per op)
+	input            phys_wr_busy,      // level: writer not idle (gate open or tail draining)
+
 	// diagnostic event toggles + per-op presented-byte count (drive-clock
 	// domain; 2-FF-synced and counted in the QNICE diag device upstream).
 	// Toggles are never reset: each edge marks exactly one event.
@@ -136,8 +152,12 @@ module fdc1772 #(
 	output reg        phys_dbg_staledone_tgl, // a done edge was ignored (seq mismatch / no op pending)
 	output reg        phys_dbg_busycmd_tgl,   // a non-Force-Interrupt command write while busy was ignored
 	output reg        phys_dbg_fin_tgl,       // a physical read op finalized (busy release)
-	output reg [10:0] phys_dbg_pres_cnt       // bytes presented by the op just finalized
+	output reg [10:0] phys_dbg_pres_cnt,      // bytes presented by the op just finalized
 	                                          // (quasi-static after each fin toggle)
+	output reg        phys_dbg_wr_fin_tgl,    // #244: a physical write op finalized (busy release)
+	output reg        phys_dbg_wr_wp_tgl,     // #244: a write command was refused by the WP pre-check
+	output reg        phys_dbg_wr_drop_tgl    // #244: a data-register write during a write op was
+	                                          //       dropped (FIFO full / after the 512th byte)
 );
 
 localparam SECTOR_SIZE = 11'd128 << SECTOR_SIZE_CODE;
@@ -219,6 +239,13 @@ iecdrv_sync #(2) phys_dseq_sync    (clkcpu, phys_rd_done_seq,  phys_rd_done_seq_
 iecdrv_sync      phys_stepack_sync (clkcpu, phys_step_ack_tgl, phys_step_ack_c);
 iecdrv_sync      phys_rddone_sync  (clkcpu, phys_rd_done_tgl,  phys_rd_done_c);
 
+// MEGA65 (#244 write): the controller/writer levels of the write path, synced like
+// the read-path levels above (the FIFO full/level taps are native clkcpu).
+wire       phys_wr_feed_c, phys_wr_lost_c, phys_wr_busy_c;
+iecdrv_sync      phys_wfeed_sync   (clkcpu, phys_wr_feed,      phys_wr_feed_c);
+iecdrv_sync      phys_wlost_sync   (clkcpu, phys_wr_lost,      phys_wr_lost_c);
+iecdrv_sync      phys_wbusy_sync   (clkcpu, phys_wr_busy,      phys_wr_busy_c);
+
 // MEGA65 (#90 review): consume the rd-done toggle two clkcpu AFTER it resolves. The
 // controller writes the result flags/C byte/done seq in the SAME 50 MHz cycle it
 // flips the toggle, and every signal crosses through its own independent
@@ -278,6 +305,54 @@ reg         phys_draining = 1'b0;   // drain-episode tracker for phys_dbg_drain_
 // rom_emu reference model's max(1,n)*1.5 ms).
 localparam [13:0] PHYS_T1_MIN_TICKS = 14'd12000;
 reg  [13:0] phys_t1_min_cnt = 14'd0; // clk8m ticks; Type-I may not finish before 0
+
+// MEGA65 (#244): physical Write Sector / Write Track. A write op is issued on the
+// read-op channel (phys_rd_op 100 / 101) with the same seq tag, pending latch and
+// two-cycle-delayed done consume as a read; nothing comes back through the read
+// FIFO (phys_reading stays 0, the pacer is never armed, the idle drain keeps
+// eating any stray read-FIFO residue). The drive CPU feeds the bytes through the
+// data register: every data-register write while the op is active is pushed into
+// the external write FIFO (phys_wr_byte_wr), and DRQ is FIFO ROOM -- it rises only
+// once the controller asserts phys_wr_feed (ID found / track op armed), and then
+// stays up while the FIFO is not full and (Write Sector) fewer than 512 bytes were
+// accepted. The FIFO lets the CPU run at most three bytes ahead of the disk; a
+// late byte is the controller's business (00 slot + sticky phys_wr_lost). The op
+// completes on the tag-matched done once the writer is idle (phys_wr_busy_c = 0):
+// "done is defined at the output stage". A write-protected disk is refused here
+// before any request (status bit 6 alone), and like every write termination it
+// holds BUSY for PHYS_T1_MIN_TICKS so the ROM's $CBF4 wait-busy-SET poll sees it.
+localparam [4:0] PHYS_RES_WRITE_PROTECTED = 5'b01001;  // physical_1581_pkg RES_WRITE_PROTECTED
+localparam [4:0] PHYS_RES_LOST_DATA       = 5'b01011;  // physical_1581_pkg RES_LOST_DATA
+localparam [4:0] PHYS_RES_OK              = 5'b00000;  // physical_1581_pkg RES_OK
+reg         phys_wr_op       = 1'b0; // the op in flight (until finalize) is a write
+reg         phys_wr_active   = 1'b0; // a write op is issued and takes bytes (until its done / abort)
+reg         phys_wr_active_d = 1'b0; // phys_wr_active one clkcpu late (DRQ clear on the falling edge)
+reg         phys_wr_track_op = 1'b0; // the write op is Write Track (no 512-byte limit)
+reg         phys_wr_wpterm   = 1'b0; // WP pre-check refusal in progress (BUSY held, then finish)
+reg         phys_wr_wp_l     = 1'b0; // status bit 6 of a write command (pre-check or RES_WRITE_PROTECTED)
+reg         phys_wr_lost_l   = 1'b0; // status bit 2 of a write command (lost level or RES_LOST_DATA)
+reg         phys_wr_clean_l  = 1'b0; // latched at done: RES_OK without lost (m = 1 may continue)
+reg         phys_wr_reissue  = 1'b0; // deferred re-issue for a multiple-sector write
+reg  [10:0] phys_wr_cnt      = 11'd0;// data-register bytes accepted (pushed) by the current op
+reg         phys_wr_fed      = 1'b0; // the controller's feed was seen high during this op
+
+// Bytes are accepted while the op is active, for Write Sector until the 512th,
+// and -- once the controller's feed has been up -- only while it still is: the
+// controller drops feed when the op ends (index cut, tail, abort), and a byte
+// written after that (the DOS keeps feeding 4E until BUSY drops at the end of a
+// Write Track) must not become residue for the next op; like the real chip,
+// which ignores data-register writes after the command ended, it is dropped and
+// counted. A preload before the first feed is still accepted. DRQ additionally
+// needs the feed, FIFO room, no push in flight (the FIFO's full flag updates
+// on the push edge) and no open data-register access (the real chip clears DRQ
+// with the data-register write; the T65 keeps the select for the whole
+// 16-clkcpu bus cycle and strobes the write at its end, so the push lands late
+// in the open window).
+wire phys_wr_accept = phys_wr_active && (phys_wr_track_op || phys_wr_cnt < SECTOR_SIZE)
+                      && !(phys_wr_fed && !phys_wr_feed_c);
+wire phys_wr_drq_ok = phys_mode && phys_wr_accept && phys_wr_feed_c && !phys_wr_fifo_full
+                      && !phys_wr_byte_wr && !(cpu_sel && cpu_addr == FDC_REG_DATA)
+                      && !cpu_rw_data;
 
 // MEGA65 (#90 round 10 hardening): never present INTO an open drive-CPU READ
 // access of the WD data register. The T65 keeps cpu_sel/cpu_addr asserted for
@@ -340,6 +415,14 @@ initial begin
 	phys_dbg_busycmd_tgl   = 1'b0;
 	phys_dbg_fin_tgl       = 1'b0;
 	phys_dbg_pres_cnt      = 11'd0;
+	// MEGA65 (#244): write-path outputs and diagnostic toggles (same rule)
+	phys_wr_deleted        = 1'b0;
+	phys_wr_precomp        = 1'b0;
+	phys_wr_byte_wr        = 1'b0;
+	phys_wr_byte_data      = 8'd0;
+	phys_dbg_wr_fin_tgl    = 1'b0;
+	phys_dbg_wr_wp_tgl     = 1'b0;
+	phys_dbg_wr_drop_tgl   = 1'b0;
 end
 
 // -------------------------------------------------------------------------
@@ -501,12 +584,49 @@ always @(posedge clkcpu)
 // command must not be mistaken for a missed byte of the new one; the real chip clears
 // DRQ on command acceptance too. cmd_rx is low again two clkcpu cycles after BUSY rose,
 // the first drq_set of the new command comes at least one clk8m_en tick later.
+// MEGA65 (#244): during a physical write op (and on the clkcpu after it ends) DRQ
+// is held clear whenever the FIFO-room condition phys_wr_drq_ok is false -- the
+// DRQ register then tracks feed/room/512-limit one clkcpu late, conservatively
+// (set needs the condition on two consecutive cycles, clear needs it false once).
+// The term is zero with phys_mode=0.
 wire drq_clr = !floppy_reset || cpu_rw_data || phys_cmd_clear
-            || (!phys_mode && cmd_rx && !cmd_type_4);
+            || (!phys_mode && cmd_rx && !cmd_type_4)
+            || (phys_mode && (phys_wr_active || phys_wr_active_d) && !phys_wr_drq_ok);
 
 always @(posedge clkcpu) begin
 	if(drq_clr) drq <= 1'b0;
 	else if(drq_set) drq <= 1'b1;
+end
+
+// MEGA65 (#244): physical write -- data-register writes into the write FIFO. Every
+// CPU write to the data register while a write op accepts bytes is one push (the
+// T65 write strobe cpu_we is one clkcpu). A byte written after the op was issued
+// but before the controller feeds (a driver that preloads the data register, like
+// the image path's data_in_valid case) is simply the first byte in the FIFO. A
+// write while the FIFO is full, after the 512th byte of a Write Sector, or after
+// the feed of the op fell is dropped and marked on phys_dbg_wr_drop_tgl (never
+// for a DRQ-driven CPU inside the op -- DRQ is the inverse of full -- but normal
+// for the trailing 4E bytes the DOS writes after a Write Track's ending index).
+// The accepted count and the fed flag restart while no write op is active, so
+// they are zero at every issue.
+always @(posedge clkcpu) begin : label_wr
+	phys_wr_byte_wr  <= 1'b0;
+	phys_wr_active_d <= phys_wr_active;
+	if (!floppy_reset || !phys_wr_active)
+		phys_wr_fed <= 1'b0;
+	else if (phys_wr_feed_c)
+		phys_wr_fed <= 1'b1;
+	if (!floppy_reset || !phys_wr_active)
+		phys_wr_cnt <= 11'd0;
+	else if (phys_mode && cpu_we && cpu_addr == FDC_REG_DATA) begin
+		if (phys_wr_accept && !phys_wr_fifo_full) begin
+			phys_wr_byte_wr   <= 1'b1;
+			phys_wr_byte_data <= cpu_din;
+			if (phys_wr_cnt != 11'h7FF)
+				phys_wr_cnt <= phys_wr_cnt + 11'd1;
+		end else
+			phys_dbg_wr_drop_tgl <= ~phys_dbg_wr_drop_tgl;
+	end
 end
 
 // -------------------------------------------------------------------------
@@ -717,6 +837,15 @@ always @(posedge clkcpu) begin : label2
 		phys_t1_min_cnt <= 14'd0;
 		phys_step_ack_serviced <= phys_step_ack_c;
 		phys_rd_done_serviced  <= phys_rd_done_c_d2;
+		// MEGA65 (#244): physical write engine reset (phys-only registers)
+		phys_wr_op       <= 1'b0;
+		phys_wr_active   <= 1'b0;
+		phys_wr_track_op <= 1'b0;
+		phys_wr_wpterm   <= 1'b0;
+		phys_wr_wp_l     <= 1'b0;
+		phys_wr_lost_l   <= 1'b0;
+		phys_wr_clean_l  <= 1'b0;
+		phys_wr_reissue  <= 1'b0;
 	end else if (clk8m_en) begin
 		sd_card_read <= 0;
 		sd_card_write <= 0;
@@ -758,6 +887,12 @@ always @(posedge clkcpu) begin : label2
 			phys_step_busy    <= 1'b0;
 			phys_reissue      <= 1'b0;
 			phys_step_tally   <= 8'd0;
+			// MEGA65 (#244): ... including the physical write engine
+			phys_wr_op        <= 1'b0;
+			phys_wr_active    <= 1'b0;
+			phys_wr_track_op  <= 1'b0;
+			phys_wr_wpterm    <= 1'b0;
+			phys_wr_reissue   <= 1'b0;
 
 			if(cmd_type_1 || cmd_type_2 || cmd_type_3) begin
 				RNF <= 1'b0;
@@ -772,6 +907,7 @@ always @(posedge clkcpu) begin : label2
 				if (phys_mode) begin
 					phys_cmd_clear <= 1'b1;
 					phys_rnf_l <= 1'b0; phys_crc_l <= 1'b0; phys_del_l <= 1'b0;
+					phys_wr_wp_l <= 1'b0; phys_wr_lost_l <= 1'b0;   // #244: write status flags
 					// round 11: arm the minimum Type-I busy time (see declaration)
 					if (cmd_type_1) phys_t1_min_cnt <= PHYS_T1_MIN_TICKS;
 				end
@@ -794,6 +930,14 @@ always @(posedge clkcpu) begin : label2
 					phys_verify        <= 1'b0;
 					phys_step_busy     <= 1'b0;
 					phys_reissue       <= 1'b0;
+					// #244: a write op is cancelled the same way; DRQ falls through
+					// the phys_wr_active term of drq_clr, the controller closes WGATE
+					// and completes with its own tag (ignored: nothing pending).
+					phys_wr_op         <= 1'b0;
+					phys_wr_active     <= 1'b0;
+					phys_wr_track_op   <= 1'b0;
+					phys_wr_wpterm     <= 1'b0;
+					phys_wr_reissue    <= 1'b0;
 				end
 			end
 		end
@@ -960,10 +1104,9 @@ always @(posedge clkcpu) begin : label2
 				// bounded by the controller at ~1.1 s -> RES_NOT_READY, an unmatched
 				// search at 5 index edges / 1.3 s -> RNF), so the controller can never
 				// be left running an op the WD already gave up on (that desync paired
-				// a stale result with the next command). Write Sector is BLOCKED
-				// (read-only milestone): the disk is presented write-protected (status
-				// WP bit forced above) and the command completes without touching
-				// media (no sd_card_write, no FIFO).
+				// a stale result with the next command). Write Sector (#244) issues
+				// one physical write op on the same channel and is fed through the
+				// external write FIFO (never sd_card_write, never the image FIFO).
 				if (cmd[7:5] == 3'b100) begin
 					// read sector
 					if (!phys_rd_pending && !phys_done_latched && !phys_reissue) begin
@@ -978,9 +1121,41 @@ always @(posedge clkcpu) begin : label2
 						phys_rd_start   <= 1'b1;
 					end
 				end else if (cmd[7:5] == 3'b101) begin
-					// write sector -> blocked; complete write-protected
-					busy    <= 1'b0;
-					irq_set <= 1'b1;
+					// MEGA65 (#244): physical Write Sector (spec 5.1). On the first
+					// execute tick: write-protect pre-check (the real chip samples
+					// /WPRT at command start), else issue the op like a read --
+					// track/side/sector from the registers, a0 -> deleted DAM,
+					// P = 0 -> precomp, fresh seq tag, pending. phys_reading stays 0
+					// (no read bytes come back). Every write termination holds
+					// BUSY for the minimum busy time (PHYS_T1_MIN_TICKS, armed
+					// here; a real op lasts >= 17 ms so it never delays one), so
+					// an immediate refusal is still seen by the ROM's $CBF4 poll.
+					if (!phys_rd_pending && !phys_done_latched && !phys_wr_reissue && !phys_wr_wpterm) begin
+						phys_t1_min_cnt <= PHYS_T1_MIN_TICKS;
+						if (phys_wprot_c) begin
+							phys_wr_wpterm     <= 1'b1;   // status bit 6 alone, no request, no DRQ
+							phys_wr_wp_l       <= 1'b1;
+							phys_dbg_wr_wp_tgl <= ~phys_dbg_wr_wp_tgl;
+						end else begin
+							phys_rd_op       <= 3'b100;   // WROP_WRITE_SECTOR
+							phys_rd_track    <= track;
+							phys_rd_side     <= floppy_side;
+							phys_rd_sector   <= sector;
+							phys_wr_deleted  <= cmd[0];   // a0 = 1 -> DAM F8
+							phys_wr_precomp  <= ~cmd[1];  // P  = 0 -> precomp on
+							phys_rd_seq      <= phys_rd_seq + 2'd1;
+							phys_rd_req_tgl  <= ~phys_rd_req_tgl;
+							phys_rd_pending  <= 1'b1;
+							phys_wr_op       <= 1'b1;
+							phys_wr_active   <= 1'b1;
+							phys_wr_track_op <= 1'b0;
+						end
+					end else if (phys_wr_wpterm && phys_t1_min_cnt == 14'd0) begin
+						// WP refusal: minimum busy elapsed -> finish (INTRQ)
+						phys_wr_wpterm <= 1'b0;
+						busy           <= 1'b0;
+						irq_set        <= 1'b1;
+					end
 				end
 			end else
 			if(cmd_type_2) begin
@@ -1103,8 +1278,9 @@ always @(posedge clkcpu) begin : label2
 				// (C,H,R,N,CRC-hi,CRC-lo) through the FIFO and, on completion, WD
 				// copies C into the sector register. Like Type-II, the op completes
 				// ONLY through the controller done handshake (not-ready is bounded
-				// there); no unilateral WD-side completion. Read/Write Track are not
-				// physically supported and simply finish (as upstream fakes them).
+				// there); no unilateral WD-side completion. Write Track (#244) is a
+				// physical write op like Write Sector; Read Track is not physically
+				// supported and simply finishes (as upstream fakes it).
 				if (cmd[7:4] == 4'b1100) begin
 					// read address
 					if (!phys_rd_pending && !phys_done_latched) begin
@@ -1118,8 +1294,39 @@ always @(posedge clkcpu) begin : label2
 						phys_reading    <= 1'b1;
 						phys_rd_start   <= 1'b1;
 					end
+				end else if (cmd[7:4] == 4'b1111) begin
+					// MEGA65 (#244): physical Write Track (spec 5.1). Same acceptance,
+					// WP pre-check and minimum busy as Write Sector; the request
+					// carries track/side for diagnostics only. The controller raises
+					// feed at once and runs index to index; the WD does not count
+					// tokens (no 512 limit) -- DRQ is FIFO room until the done.
+					if (!phys_rd_pending && !phys_done_latched && !phys_wr_wpterm) begin
+						phys_t1_min_cnt <= PHYS_T1_MIN_TICKS;
+						if (phys_wprot_c) begin
+							phys_wr_wpterm     <= 1'b1;
+							phys_wr_wp_l       <= 1'b1;
+							phys_dbg_wr_wp_tgl <= ~phys_dbg_wr_wp_tgl;
+						end else begin
+							phys_rd_op       <= 3'b101;   // WROP_WRITE_TRACK
+							phys_rd_track    <= track;
+							phys_rd_side     <= floppy_side;
+							phys_rd_sector   <= sector;
+							phys_wr_deleted  <= 1'b0;
+							phys_wr_precomp  <= ~cmd[1];  // P = 0 -> precomp on
+							phys_rd_seq      <= phys_rd_seq + 2'd1;
+							phys_rd_req_tgl  <= ~phys_rd_req_tgl;
+							phys_rd_pending  <= 1'b1;
+							phys_wr_op       <= 1'b1;
+							phys_wr_active   <= 1'b1;
+							phys_wr_track_op <= 1'b1;
+						end
+					end else if (phys_wr_wpterm && phys_t1_min_cnt == 14'd0) begin
+						phys_wr_wpterm <= 1'b0;
+						busy           <= 1'b0;
+						irq_set        <= 1'b1;
+					end
 				end else begin
-					// read track / write track: not physically supported -> finish
+					// read track: not physically supported -> finish
 					busy    <= 1'b0;
 					irq_set <= 1'b1;
 				end
@@ -1205,6 +1412,21 @@ always @(posedge clkcpu) begin : label2
 					// let the existing residue path discard every quarantined byte.
 					if (phys_rd_rnf_c || phys_rd_crc_err_c)
 						phys_reading <= 1'b0;
+					// MEGA65 (#244): a write op stops taking bytes (DRQ falls) and
+					// latches its status: WP appears ALONE (the $CD5A table maps WP
+					// with CRC/RNF to garbage job codes), LOST DATA is the sticky
+					// lost level sampled here or the first-byte / token abort.
+					if (phys_wr_op) begin
+						phys_wr_active  <= 1'b0;
+						phys_wr_clean_l <= (phys_rd_result_c == PHYS_RES_OK) && !phys_wr_lost_c
+						                   && !phys_rd_rnf_c && !phys_rd_crc_err_c;
+						if (phys_rd_result_c == PHYS_RES_WRITE_PROTECTED) begin
+							phys_wr_wp_l <= 1'b1;
+							phys_rnf_l   <= 1'b0;
+							phys_crc_l   <= 1'b0;
+						end else
+							phys_wr_lost_l <= phys_wr_lost_c || (phys_rd_result_c == PHYS_RES_LOST_DATA);
+					end
 				end else begin
 					phys_dbg_staledone_tgl <= ~phys_dbg_staledone_tgl;
 				end
@@ -1232,7 +1454,7 @@ always @(posedge clkcpu) begin : label2
 			// then completes with the error status.
 			// (round 11: a verify completion is a Type-I completion, so it also
 			// honors the minimum Type-I busy time -- see PHYS_T1_MIN_TICKS.)
-			if (phys_done_latched && phys_byte_empty && phys_pace_cnt == 8'd0
+			if (phys_done_latched && !phys_wr_op && phys_byte_empty && phys_pace_cnt == 8'd0
 			    && !phys_present_now
 			    && (!phys_verify || phys_t1_min_cnt == 14'd0)) begin
 				phys_done_latched <= 1'b0;
@@ -1289,6 +1511,51 @@ always @(posedge clkcpu) begin : label2
 				phys_rd_pending <= 1'b1;
 				phys_reading    <= 1'b1;
 				phys_rd_start   <= 1'b1;
+			end
+
+			// MEGA65 (#244): finalize a physical WRITE op. Fires on the first clk8m
+			// tick where (a) the tag-matched done has been consumed and (b) the
+			// writer is idle (phys_wr_busy_c = 0: done is defined at the output
+			// stage, the last cell is on the disk), and (c) the minimum busy time
+			// armed at the issue has elapsed. No byte-drain tail and no
+			// presentation: nothing comes back for a write. Status bits 6/4/3/2
+			// come from the flags latched at the done (RNF here, as for reads).
+			// m = 1 Write Sector: a CLEAN completion (RES_OK, no lost) advances the
+			// sector and re-issues with a fresh tag next tick, mirroring the
+			// multi-sector read; any error or LOST DATA terminates the command.
+			if (phys_done_latched && phys_wr_op && !phys_wr_busy_c
+			    && phys_t1_min_cnt == 14'd0) begin
+				phys_done_latched   <= 1'b0;
+				phys_wr_op          <= 1'b0;
+				RNF                 <= phys_rnf_l;
+				phys_dbg_wr_fin_tgl <= ~phys_dbg_wr_fin_tgl;
+				if (!phys_wr_track_op && cmd[7:5] == 3'b101 && cmd[4] && phys_wr_clean_l) begin
+					sector_inc_strobe <= 1'b1;
+					phys_wr_reissue   <= 1'b1;
+				end else begin
+					busy    <= 1'b0;
+					irq_set <= 1'b1;
+				end
+			end
+
+			// MEGA65 (#244): deferred re-issue for a multiple-sector write (sector
+			// already incremented); same !cmd_rx gate as the read reissue above,
+			// for the same Force-Interrupt collision reason.
+			if (phys_wr_reissue && !cmd_rx) begin
+				phys_wr_reissue  <= 1'b0;
+				phys_t1_min_cnt  <= PHYS_T1_MIN_TICKS;
+				phys_rd_op       <= 3'b100;   // WROP_WRITE_SECTOR
+				phys_rd_track    <= track;
+				phys_rd_side     <= floppy_side;
+				phys_rd_sector   <= sector;   // incremented by sector_inc_strobe last tick
+				phys_wr_deleted  <= cmd[0];
+				phys_wr_precomp  <= ~cmd[1];
+				phys_rd_seq      <= phys_rd_seq + 2'd1;
+				phys_rd_req_tgl  <= ~phys_rd_req_tgl;
+				phys_rd_pending  <= 1'b1;
+				phys_wr_op       <= 1'b1;
+				phys_wr_active   <= 1'b1;
+				phys_wr_track_op <= 1'b0;
 			end
 		end
 
@@ -1522,6 +1789,10 @@ always @(posedge clkcpu) begin : label4
 
 	drq_set <= 1'b0;
 
+	// MEGA65 (#244): physical write -- DRQ is FIFO room (see phys_wr_drq_ok and the
+	// drq_clr term); false whenever phys_mode=0.
+	if (phys_wr_drq_ok) drq_set <= 1'b1;
+
 	// MEGA65 (#90): physical read -- CRC-GATED, DISK-PACED byte presentation.
 	// Every PHYS_PACE_TICKS clk8m ticks (one DD MFM byte-time, ~32 us) the head
 	// of the external read FIFO is popped into the data register and DRQ is
@@ -1705,10 +1976,11 @@ end
 // the status byte
 // MEGA65 (#90): in phys_mode the mechanical/result bits come from the physical
 // controller (synced levels + latched op flags). With phys_mode=0 every bit is
-// byte-identical to upstream. WD1772 (MODEL==2) b7 = motor. Write commands force
-// the write-protect bit (physical drive is read-only in this milestone).
+// byte-identical to upstream. WD1772 (MODEL==2) b7 = motor. MEGA65 (#244): for the
+// write commands b6 is the latched write-protect outcome of the op (WP pre-check or
+// RES_WRITE_PROTECTED, always alone) and b2 adds the write op's LOST DATA.
 wire [7:0] status = { (MODEL == 1 || MODEL == 3) ? !floppy_ready : (phys_mode ? phys_motor_on_c : motor_on),
-		      phys_mode ? ( ((cmd[7:5] == 3'b101) || (cmd[7:4] == 4'b1111)) ? 1'b1
+		      phys_mode ? ( ((cmd[7:5] == 3'b101) || (cmd[7:4] == 4'b1111)) ? phys_wr_wp_l
 		                    : (cmd_type_1 ? phys_wprot_c : 1'b0) )
 		                : ((cmd[7:5] == 3'b101 || cmd[7:4] == 4'b1111 || cmd_type_1) && fd_writeprot), // wrprot (only for write!)
 		      cmd_type_1 ? motor_spin_up_done : ((phys_mode && cmd[7:5] == 3'b100) ? phys_del_l : 1'b0), // data mark / deleted
@@ -1723,7 +1995,7 @@ wire [7:0] status = { (MODEL == 1 || MODEL == 3) ? !floppy_ready : (phys_mode ? 
 		      // track0 (Type I) / lost data. In phys mode LOST DATA is the real
 		      // WD1772 flag: a disk-paced presentation overwrote an unconsumed byte.
 		      cmd_type_1 ? (phys_mode ? phys_track0_c : fd_track0)
-		                 : (phys_mode ? phys_lost_l   : data_lost),
+		                 : (phys_mode ? (phys_lost_l | phys_wr_lost_l) : data_lost),
 		      cmd_type_1 ? (phys_mode ? ~phys_index_c : ~fd_index) : drq,       // index mark/drq
 		      busy } /* synthesis keep */;
 
