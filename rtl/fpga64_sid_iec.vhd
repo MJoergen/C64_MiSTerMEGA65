@@ -134,6 +134,10 @@ port(
 	dma_dout    : in  unsigned(7 downto 0) := (others => '0');
 	dma_din     : out unsigned(7 downto 0);
 	dma_we      : in  std_logic := '0';
+	-- 11/03/26 by sy2002, issue #259: a hardware DMA master (MOS 8726 REC in the Commodore REUs)
+	-- still completes one write in the first cycle after BA has dropped. main.vhd asserts
+	-- dma_grace for exactly that cycle so that it is served like a normal CPU-phase DMA cycle.
+	dma_grace   : in  std_logic := '0';
 	irq_ext_n   : in  std_logic := '1';
 
 	-- paddle interface
@@ -411,7 +415,9 @@ begin
 	if rising_edge(clk32) then
 		if sysCycle = sysCycleDef'pred(CYCLE_CPU0) then
 			phi0_cpu <= '1';
-			if baLoc = '1' or (cpuWe = '1' and dma_active = '0') or (ba_dma = '1' and dma_active = '1') then
+			-- dma_grace: see the port comment (issue #259); like ba_dma it only grants the CPU half
+			-- of a cycle in which the VIC has already pulled BA low but does not yet own the bus.
+			if baLoc = '1' or (cpuWe = '1' and dma_active = '0') or ((ba_dma = '1' or dma_grace = '1') and dma_active = '1') then
 				cpuHasBus <= '1';
 			end if;
 		end if;
