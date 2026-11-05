@@ -46,6 +46,15 @@
 --   Fixing ramCE by respecting romL, romH, UMAXromH and UMAXnomap,
 --   cs_turbo_eligible so that HW carts still work in turbo mode
 -- * Refined access to the custom Kernal
+-- * Ported upstream MiSTer commit d6048db ("Disable turbo while I/O access
+--   for better compatibility"): cs_io in the turbo decision (a no-op in this
+--   design, kept for upstream parity, see cs_io)
+-- * Clean-cycle rule for hardware cartridges in turbo mode: an access to the
+--   physical expansion port runs only at CYCLE_CPUC of a 1 MHz cycle in which
+--   the CPU has not run before (see cpu_cyc); ROML/ROMH strobes of a waiting
+--   access are gated (fpga64_buslogic.vhd), and the new output cpu_deferred
+--   lets main.vhd keep R/W of a waiting access off the expansion port
+-- * A CPU write to $FF00 (REU trigger) is never turbo-eligible
 --
 -- -----------------------------------------------------------------------
 
@@ -121,6 +130,9 @@ port(
 	IOF         : out std_logic;
 	dotclk      : out std_logic;
 	phi2        : out std_logic;
+	-- 11/5/26 by sy2002: '1' while the pending CPU access waits for the next clean 1 MHz cycle
+	-- (turbo mode only, see cpu_deferred below); main.vhd keeps such an access off the expansion port
+	cpu_deferred : out std_logic;
 
 --  Removed by sy2002 when switching from the PS/2 keyboard to a faithful CIA1-based implementation
 --	freeze_key  : out std_logic;
@@ -234,13 +246,14 @@ signal systemWe     : std_logic;
 signal pulseWr_io   : std_logic;
 signal systemAddr   : unsigned(15 downto 0);
 
+signal cs_io        : std_logic; -- 11/5/26 by sy2002: ported from upstream d6048db
 signal cs_vic       : std_logic;
 signal cs_sid       : std_logic;
 signal cs_color     : std_logic;
 signal cs_cia1      : std_logic;
 signal cs_cia2      : std_logic;
 signal cs_ram       : std_logic;
-signal cs_turbo_eligible : std_logic; -- C64MEGA65: narrower companion of cs_ram for the turbo cycles of cpu_cyc;
+signal cs_turbo_eligible : std_logic; -- C64MEGA65: narrower companion of cs_ram for cpu_cyc (turbo slots and clean-cycle rule)
 signal cpuWe        : std_logic;
 signal cpuWe_pre    : std_logic;
 signal cpuAddr      : unsigned(15 downto 0);
@@ -561,6 +574,15 @@ port map (
 
 IOE <= ioe_i;
 IOF <= iof_i;
+
+-- 11/5/26 by sy2002: ported from upstream MiSTer commit d6048db
+-- ("Disable turbo while I/O access for better compatibility") and kept for upstream parity.
+-- It is a no-op here, as it is upstream: the turbo decision next to cpu_cyc samples cs_io only
+-- at CYCLE_EXT1 and CYCLE_EXT5, where cpuHasBus = '0', and fpga64_buslogic.vhd sets the CPU chip
+-- selects only while cpuHasBus = '1'. So cs_io is always '0' there and never withholds a turbo
+-- slot. An I/O access still runs at 1 MHz: it is not turbo-eligible and waits for CYCLE_CPUC of
+-- a clean cycle (io_enable = '1', see cpu_cyc).
+cs_io <= cs_vic or cs_sid or cs_color or cs_cia1 or cs_cia2 or ioe_i or iof_i;
 
 process(clk32)
 begin
@@ -902,13 +924,39 @@ ramCE   <= cs_ram when (sysCycle = CYCLE_VIC0 or cpu_cyc = '1') and (romL = '0' 
 --
 -- The CPU0/4/8 turbo conjuncts use cs_turbo_eligible instead of the overloaded cs_ram
 -- so that hardware-cartridge accesses cannot trigger an early CPU advance and break
--- the cart's PHI2 timing. The CYCLE_CPUC clause stays on cs_ram so that a hardware-cart
--- access still completes at the natural 1 MHz slot.
+-- the cart's PHI2 timing.
+--
+-- 11/5/26 by sy2002: clean-cycle rule for hardware cartridges
+--
+-- The CYCLE_CPUC clause uses cs_turbo_eligible, too (it used cs_ram before). In a 1 MHz
+-- cycle in which the CPU already ran in a turbo slot (io_enable = '0'), only RAM, the
+-- character ROM, BASIC/KERNAL and, in SIMCRT mode, the cartridge BRAM cache may run at
+-- CPUC. Every access to the physical expansion port (ROML, ROMH, Ultimax ROMH, Ultimax
+-- unmapped area; IO1/IO2 via io_enable inside fpga64_buslogic.vhd) therefore waits for
+-- the next clean 1 MHz cycle, exactly like an I/O access. There, the cartridge gets the
+-- same window as with turbo off: the CPU address reaches the port only while PHI2 is high
+-- (while PHI2 is low, aec = '1' and the port shows the VIC-II address), and the data must
+-- be valid about 410 ns later (CPU1 to CPUD), instead of only 30 to 280 ns after an access
+-- in a turbo slot. With turbo off, io_enable is always '1' at CPUC, so the clause is
+-- unchanged. ramCE above keeps cs_ram.
 cpu_cyc <= '1' when
 				(sysCycle = CYCLE_CPU0 and turbo_m(0) = '1' and cs_turbo_eligible = '1' ) or
 				(sysCycle = CYCLE_CPU4 and turbo_m(1) = '1' and cs_turbo_eligible = '1' ) or
 				(sysCycle = CYCLE_CPU8 and turbo_m(2) = '1' and cs_turbo_eligible = '1' ) or
-				(sysCycle = CYCLE_CPUC and (io_enable = '1'  or cs_ram = '1')) else '0';
+				(sysCycle = CYCLE_CPUC and (io_enable = '1'  or cs_turbo_eligible = '1')) else '0';
+
+-- 11/5/26 by sy2002: clean-cycle rule for hardware cartridges
+--
+-- cpu_deferred = '1' while the CPU has the bus with an access that waits for the next clean
+-- 1 MHz cycle: the CPU already ran in a turbo slot of this cycle (io_enable = '0') and the
+-- pending access is not turbo-eligible, so cpu_cyc does not execute it at CYCLE_CPUC. Such an
+-- access must stay invisible on the expansion port until it runs: fpga64_buslogic.vhd gates
+-- the cartridge strobes, and main.vhd uses cpu_deferred to keep R/W high and the write data
+-- off the port, e.g. for the Ultimax unmapped area, which has no strobe. Otherwise a cartridge
+-- that samples R/W at the falling edge of PHI2 would see such a write twice: in the waiting
+-- cycle and in the clean cycle. With turbo off, cpuHasBus = '1' only from CYCLE_CPU0 to
+-- CYCLE_CPUF, where io_enable is always '1', so cpu_deferred is constantly '0'.
+cpu_deferred <= '1' when cpuHasBus = '1' and io_enable = '0' and cs_turbo_eligible = '0' else '0';
 				
 process(clk32)
 begin
@@ -926,7 +974,8 @@ begin
 			dma_active <= dma_req;
 			turbo_en <= turbo_mode(0);
 			turbo_m <= "000";
-			if dma_req = '0' and ((turbo_mode(0) and turbo_state) = '1' or turbo_mode(1) = '1') then
+			-- 11/5/26 by sy2002: "cs_io = '0'" ported from upstream MiSTer commit d6048db
+			if cs_io = '0' and dma_req = '0' and ((turbo_mode(0) and turbo_state) = '1' or turbo_mode(1) = '1') then
 				case turbo_speed is
 					when "00" => turbo_m <= "010";
 					when "01" => turbo_m <= "110";

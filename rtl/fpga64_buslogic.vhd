@@ -65,6 +65,23 @@
 -- See the comment at the cs_turbo_eligible_o formula below for details
 -- -----------------------------------------------------------------------
 
+-- -----------------------------------------------------------------------
+-- sy2002 11/5/26
+--
+-- Clean-cycle rule for hardware cartridges in turbo mode
+-- (https://github.com/MJoergen/C64MEGA65/issues/87):
+--
+-- 1. In hardware-cartridge mode, cs_romL and cs_romH of CPU accesses are
+--    gated with io_enable, like cs_ioE and cs_ioF, so that a cartridge
+--    access never strobes the expansion port in a 1 MHz cycle in which the
+--    CPU already ran in a turbo slot.
+--
+-- 2. A CPU write to $FF00 is never turbo-eligible, so that a hardware REU
+--    sees this trigger at the falling edge of PHI2 at every turbo speed.
+--
+-- See the comments at cs_turbo_eligible_o and cs_romL below for details
+-- -----------------------------------------------------------------------
+
 library IEEE;
 USE ieee.std_logic_1164.ALL;
 USE ieee.numeric_std.ALL;
@@ -176,6 +193,7 @@ architecture rtl of fpga64_buslogic is
 	signal cs_UMAXromHLoc : std_logic;
 	signal cs_UMAXnomapLoc: std_logic;
 	signal ultimax        : std_logic;
+	signal cpu_ff00_wr    : std_logic; -- 11/5/26 by sy2002: CPU write to $FF00 (REU trigger)
 
 	signal currentAddr    : unsigned(15 downto 0);
 	
@@ -450,7 +468,16 @@ begin
 
    -- 6/7/26 by sy2002: C64MEGA65 turbo-mode protection for hardware cartridges
    --
-	-- Narrower companion of cs_ram for the turbo cycles of cpu_cyc in fpga64_sid_iec.vhd.
+	-- 11/5/26 by sy2002: clean-cycle rule for hardware cartridges
+	--
+	-- Narrower companion of cs_ram for cpu_cyc in fpga64_sid_iec.vhd. It selects the accesses
+	-- that may run in the turbo slots CPU0/4/8 and at CYCLE_CPUC after a turbo access in the
+	-- same 1 MHz cycle. Every other access (I/O, IO1/IO2, everything on the physical expansion
+	-- port and the CPU write to $FF00) runs only at CYCLE_CPUC of a clean 1 MHz cycle, i.e. one
+	-- in which the CPU has not run before (io_enable = '1'). There, a cartridge gets the same
+	-- window as with turbo off: the CPU address reaches the port only while PHI2 is high (while
+	-- PHI2 is low, aec = '1' and the port shows the VIC-II address), and the data must be valid
+	-- about 410 ns later (CPU1 to CPUD).
 	-- Includes only chip-selects that target fast internal memory:
 	--   cs_ramLoc            — main DRAM (BRAM here), fast.
 	--   cs_CharLoc           — character ROM, internal BRAM, fast.
@@ -462,9 +489,18 @@ begin
 	--   cs_UMAXnomapLoc      — Ultimax unmapped (IDE64 path); always served by the physical
 	--                          cart, never turbo-eligible.
 	--   cs_ioE / cs_ioF      — cart bank-switch registers; must run at 1 MHz on real carts
-	--                          AND are already auto-slowed via the io_enable clause of CPUC.
-	cs_turbo_eligible_o <= cs_ramLoc or cs_CharLoc or cs_romLoc
-	                    or (sim_crt_i and (cs_romLLoc or cs_romHLoc or cs_UMAXromHLoc));
+	--                          AND are already gated with io_enable (cs_ioE / cs_ioF below).
+	--   cpu_ff00_wr          — 11/5/26 by sy2002: a CPU write to $FF00 (RAM below the KERNAL)
+	--                          starts a REU command that waits for it (command bit 4 = 0). A
+	--                          hardware REU snoops the bus for this write at the falling edge
+	--                          of PHI2, where a write from a turbo slot never is. So the write
+	--                          waits for a clean 1 MHz cycle, in all modes. With turbo off,
+	--                          every write runs at CYCLE_CPUC of a clean cycle anyway.
+	cpu_ff00_wr <= '1' when cpuHasBus = '1' and cpuWe = '1' and cpuAddr = x"FF00" else '0';
+
+	cs_turbo_eligible_o <= (cs_ramLoc or cs_CharLoc or cs_romLoc
+	                        or (sim_crt_i and (cs_romLLoc or cs_romHLoc or cs_UMAXromHLoc)))
+	                       and not cpu_ff00_wr;
 
 	cs_vic <= cs_vicLoc and io_enable;
 	cs_sid <= cs_sidLoc and io_enable;
@@ -473,8 +509,23 @@ begin
 	cs_cia2 <= cs_cia2Loc and io_enable;
 	cs_ioE <= cs_ioELoc and io_enable;
 	cs_ioF <= cs_ioFLoc and io_enable;
-	cs_romL <= cs_romLLoc and not aec;          -- 4/7/23 added and not aec by sy2002
-	cs_romH <= cs_romHLoc and not aec;          -- 4/7/23 added and not aec by sy2002
+
+	-- 11/5/26 by sy2002: clean-cycle rule for hardware cartridges
+	--
+	-- In hardware-cartridge mode (sim_crt_i = '0'), cs_romL and cs_romH are gated with io_enable
+	-- like cs_ioE and cs_ioF: a ROML or ROMH access that waits for the next clean 1 MHz cycle (see
+	-- cs_turbo_eligible_o) must not strobe the cartridge in the cycle in which it waits. Otherwise
+	-- a write, e.g. to the Ultimax ROMH area $E000-$FFFF, reaches the cartridge twice: at the
+	-- falling edge of PHI2 of the waiting cycle and again in the clean cycle.
+	-- Only CPU accesses are affected: their chip selects are set only while cpuHasBus = '1', i.e.
+	-- from CYCLE_CPU0 to CYCLE_CPUF, and there io_enable is always '1' while turbo is off. In SIMCRT
+	-- mode, the BRAM cache serves ROML and ROMH in the turbo slots, too, so both stay ungated there.
+	-- cs_UMAXromH (VIC-II fetches) stays as it is. cs_UMAXnomap stays ungated, too: this area has
+	-- no strobe on the port, and main.vhd needs the signal to keep its data bus driver off while a
+	-- cartridge may answer. For a waiting access, main.vhd keeps R/W high instead (cpu_deferred in
+	-- fpga64_sid_iec.vhd).
+	cs_romL <= cs_romLLoc and not aec and (io_enable or sim_crt_i); -- 4/7/23 added and not aec by sy2002
+	cs_romH <= cs_romHLoc and not aec and (io_enable or sim_crt_i); -- 4/7/23 added and not aec by sy2002
 	cs_UMAXromH   <= cs_UMAXromHLoc and aec;    -- 4/7/23 added and aec by sy2002
 	cs_UMAXnomap  <= cs_UMAXnomapLoc;           -- 6/29/25 added by sy2002
 
