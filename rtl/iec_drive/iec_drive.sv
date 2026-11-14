@@ -33,6 +33,13 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 
 	output  [N:0] led,
 
+	// MEGA65 (C64MEGA65 #257): the power LED of the 1581 engines (CIA PA5), one bit
+	// per drive; 0 for a drive that runs the 1541 engine. The 1581 DOS blinks this LED
+	// while an error is pending (ROM $CE1F: it toggles PA5 every 100 ms) and leaves it
+	// wherever the last toggle put it, so the level alone means nothing: the caller
+	// detects the blinking. Kept apart from "led", which is the activity of the drive.
+	output  [N:0] pwr_led,
+
 	input         iec_atn_i,
 	input         iec_data_i,
 	input         iec_clk_i,
@@ -262,7 +269,7 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 // contributes '1').
 // The stale signal names in the original commented block (rom_addr/rom_data/rom_wr/rom_std)
 // are corrected to the actual _i-suffixed ports; bit15 of rom_addr_i selects the 1581 ROM
-// window. iec_fclk_o and pwr_led are intentionally left unconnected (C64 has no fast serial).
+// window. iec_fclk_o is intentionally left unconnected (C64 has no fast serial).
 c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 (
 	.clk(clk),
@@ -280,6 +287,7 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.iec_clk_o (c1581_iec_clk),
 
 	.act_led(c1581_led),
+	.pwr_led(pwr_led),
 
 	.par_data_i(par_data_i),
 	.par_stb_i(par_stb_i),
