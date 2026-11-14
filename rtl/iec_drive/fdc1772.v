@@ -952,11 +952,10 @@ always @(posedge clkcpu) begin : label2
 			if(cmd_type_1) begin
 				// MEGA65 (#90): in phys_mode Type-I commands run UNCONDITIONALLY, like
 				// on the real WD1772 (the 177x has no READY input; only the 179x gated
-				// commands on readiness). Gating them on media-ready would deadlock the
-				// whole drive: media-ready requires the disk-change latch to be clear,
-				// the latch is only cleared by a step, and every step arrives as a
-				// Type-I command. The 1581 DOS resolves power-up/change by stepping;
-				// it must always be able to. track0 still comes from the controller.
+				// commands on readiness). The 1581 DOS has to be able to step whatever
+				// the mechanism reports: it answers a disk change with a Step In and a
+				// Step Out before it examines READY, and a completed step is what
+				// clears the disk-change latch. track0 still comes from the controller.
 				if(!phys_mode && !fd_present) begin
 					// no image/disk selected -> send irq after 6 ms
 					if (!notready_wait) begin
